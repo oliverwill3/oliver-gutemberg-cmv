@@ -121,14 +121,14 @@ export default function ComprasPage() {
             <div className="eyebrow">Estoque · Compras</div>
             <h1 className="page-title">Entrada de notas fiscais</h1>
             <p className="page-subtitle">
-              Configure o Firebase e o Gemini para iniciar o fluxo de compras.
+              Configure o Firebase e o Grok para iniciar o fluxo de compras.
             </p>
           </div>
         </div>
         <div className="notice">
           Preencha as credenciais Firebase em <code>.env.local</code>. A chave
-          privada do Gemini deve ser configurada somente no servidor como{" "}
-          <code>GEMINI_API_KEY</code>, sem o prefixo NEXT_PUBLIC.
+          chave privada da xAI deve ser configurada somente no servidor como{" "}
+          <code>XAI_API_KEY</code>, sem o prefixo NEXT_PUBLIC.
         </div>
       </AdminShell>
     );

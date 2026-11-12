@@ -1,4 +1,3 @@
-import { GoogleGenAI, Type, type Part } from "@google/genai";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { NextResponse, type NextRequest } from "next/server";
 
@@ -6,11 +5,9 @@ export const runtime = "nodejs";
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 14 * 1024 * 1024;
-const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png"]);
 const UNITS = ["", "kg", "g", "L", "ml", "unidade", "pacote", "caixa"];
 const CLASSES = ["", "insumo_producao", "compra_geral"];
-const INVOICE_UNITS = UNITS.filter(Boolean);
-const INVOICE_CLASSES = CLASSES.filter(Boolean);
 const firebaseProjectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
 const firebaseKeys = createRemoteJWKSet(
   new URL(
@@ -173,28 +170,32 @@ async function readOcrInput(request: NextRequest): Promise<OcrInput> {
 function getSchema(type: ImportType) {
   if (type === "invoice") {
     return {
-      type: Type.OBJECT,
+      type: "object",
+      additionalProperties: false,
       properties: {
-        fornecedor: { type: Type.STRING },
-        numeroNota: { type: Type.STRING },
-        dataEmissao: { type: Type.STRING },
+        fornecedor: { type: "string" },
+        numeroNota: { type: "string" },
+        dataEmissao: { type: "string" },
         itens: {
-          type: Type.ARRAY,
+          type: "array",
           items: {
-            type: Type.OBJECT,
+            type: "object",
+            additionalProperties: false,
             properties: {
-              descricao: { type: Type.STRING },
-              quantidade: { type: Type.STRING },
-              unidade: { type: Type.STRING, enum: INVOICE_UNITS },
-              valorUnitario: { type: Type.STRING },
-              valorTotal: { type: Type.STRING },
-              classificacao: { type: Type.STRING, enum: INVOICE_CLASSES },
+              descricao: { type: "string" },
+              quantidade: { type: "string" },
+              unidade: { type: "string", enum: UNITS },
+              valorUnitario: { type: "string" },
+              valorTotal: { type: "string" },
+              classificacao: { type: "string", enum: CLASSES },
             },
             required: [
               "descricao",
               "quantidade",
+              "unidade",
               "valorUnitario",
               "valorTotal",
+              "classificacao",
             ],
           },
         },
@@ -204,16 +205,18 @@ function getSchema(type: ImportType) {
   }
 
   return {
-    type: Type.OBJECT,
+    type: "object",
+    additionalProperties: false,
     properties: {
       itens: {
-        type: Type.ARRAY,
+        type: "array",
         items: {
-          type: Type.OBJECT,
+          type: "object",
+          additionalProperties: false,
           properties: {
-            nome: { type: Type.STRING },
-            preco: { type: Type.NUMBER },
-            categoria: { type: Type.STRING },
+            nome: { type: "string" },
+            preco: { type: "number" },
+            categoria: { type: "string" },
           },
           required: ["nome", "preco", "categoria"],
         },
@@ -241,7 +244,7 @@ function normalizeMenuItems(
   value: unknown,
 ): Array<{ nome: string; preco: number; categoria: string }> {
   if (!Array.isArray(value)) {
-    throw new Error("A resposta do Gemini não contém uma lista de itens.");
+    throw new Error("A resposta do Grok não contém uma lista de itens.");
   }
   if (value.length === 0) {
     throw new Error(
@@ -285,7 +288,7 @@ function safeErrorDetails(error: unknown, apiKey: string) {
     const parsed: unknown = JSON.parse(message);
     if (isRecord(parsed)) parsedMessage = parsed;
   } catch {
-    // Keep the original SDK error message when it is not JSON.
+    // Keep the original provider error message when it is not JSON.
   }
   const parsedError = isRecord(parsedMessage.error)
     ? parsedMessage.error
@@ -321,6 +324,22 @@ function safeErrorDetails(error: unknown, apiKey: string) {
   };
 }
 
+function getXaiOutputText(response: unknown): string | undefined {
+  if (!isRecord(response) || !Array.isArray(response.output)) return undefined;
+  for (const outputItem of response.output) {
+    if (!isRecord(outputItem) || outputItem.type !== "message") continue;
+    if (!Array.isArray(outputItem.content)) continue;
+    const text = outputItem.content.find(
+      (content) =>
+        isRecord(content) &&
+        content.type === "output_text" &&
+        typeof content.text === "string",
+    );
+    if (isRecord(text) && typeof text.text === "string") return text.text;
+  }
+  return undefined;
+}
+
 export async function POST(request: NextRequest) {
   let user: AuthenticatedUser | null;
   try {
@@ -341,10 +360,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.XAI_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
-      { error: "O serviço de OCR não está configurado no servidor." },
+      { error: "Configure XAI_API_KEY no ambiente do servidor para usar o OCR." },
       { status: 503 },
     );
   }
@@ -378,7 +397,7 @@ export async function POST(request: NextRequest) {
     } else {
       if (!mimeType || !IMAGE_TYPES.has(mimeType)) {
         return NextResponse.json(
-          { error: "Envie uma imagem JPEG, PNG ou WebP." },
+          { error: "Envie uma imagem JPEG ou PNG." },
           { status: 400 },
         );
       }
@@ -405,7 +424,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const ai = new GoogleGenAI({ apiKey });
     const instruction =
       importType === "invoice"
         ? [
@@ -427,35 +445,88 @@ export async function POST(request: NextRequest) {
               : "Leia todas as colunas e seções, mantendo a ordem visual de cima para baixo e da esquerda para a direita.",
           ].join(" ");
 
-    stage = "chamada ao Gemini";
-    const parts: Part[] = [{ text: instruction }];
-    if (text) {
-      parts.push({ text: `Texto bruto do cardápio:\n${text}` });
-    } else if (imageData && mimeType) {
-      parts.push({ inlineData: { mimeType, data: imageData } });
+    stage = "chamada ao Grok";
+    const userContent: Array<Record<string, string>> = [];
+    if (imageData && mimeType) {
+      userContent.push({
+        type: "input_image",
+        image_url: `data:${mimeType};base64,${imageData}`,
+        detail: "high",
+      });
     }
-    const response = await ai.models.generateContent({
-      model: process.env.GEMINI_MODEL || "gemini-3.8-flash",
-      contents: [
-        {
-          role: "user",
-          parts,
-        },
-      ],
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: getSchema(importType),
-      },
+    userContent.push({
+      type: "input_text",
+      text: text
+        ? `${instruction}\n\nTexto bruto do cardápio:\n${text}`
+        : instruction,
     });
 
-    stage = "validação da resposta do Gemini";
-    const responseText = response.text?.trim();
+    const xaiResponse = await fetch("https://api.x.ai/v1/responses", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: process.env.XAI_MODEL || "grok-4.7",
+        instructions:
+          "Extraia informações exclusivamente da imagem ou texto fornecido. Não invente nem estime dados ausentes.",
+        input: [{ role: "user", content: userContent }],
+        text: {
+          format: {
+            type: "json_schema",
+            name: "ocr_result",
+            schema: getSchema(importType),
+            strict: true,
+          },
+        },
+        store: false,
+        max_output_tokens: 16000,
+      }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(90_000),
+    });
+    const providerBody = await xaiResponse.text();
+    let providerResult: unknown;
+    try {
+      providerResult = JSON.parse(providerBody) as unknown;
+    } catch {
+      throw new Error(
+        JSON.stringify({
+          error: {
+            status: xaiResponse.status,
+            message: `A API xAI retornou uma resposta não JSON (HTTP ${xaiResponse.status}).`,
+          },
+        }),
+      );
+    }
+    if (!xaiResponse.ok) {
+      const providerError =
+        isRecord(providerResult) && isRecord(providerResult.error)
+          ? providerResult.error
+          : {};
+      throw new Error(
+        JSON.stringify({
+          error: {
+            status: xaiResponse.status,
+            code: providerError.code,
+            message:
+              typeof providerError.message === "string"
+                ? providerError.message
+                : `A API xAI rejeitou a solicitação (HTTP ${xaiResponse.status}).`,
+          },
+        }),
+      );
+    }
+
+    stage = "validação da resposta do Grok";
+    const responseText = getXaiOutputText(providerResult)?.trim();
     if (!responseText) {
-      throw new Error("O Gemini retornou uma resposta vazia.");
+      throw new Error("O Grok retornou uma resposta vazia ou incompleta.");
     }
     const extracted: unknown = JSON.parse(responseText);
     if (!isRecord(extracted)) {
-      throw new Error("O Gemini retornou JSON em formato inválido.");
+      throw new Error("O Grok retornou JSON em formato inválido.");
     }
     const rawItems = Array.isArray(extracted.itens) ? extracted.itens : [];
     if (rawItems.length > 300) {
@@ -477,7 +548,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ importType, itens });
   } catch (error) {
     const details = safeErrorDetails(error, apiKey);
-    console.error("Gemini OCR processing failed", {
+    console.error("Grok OCR processing failed", {
       importType,
       source: text ? "text" : "image",
       stage,

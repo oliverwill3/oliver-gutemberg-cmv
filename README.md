@@ -6,14 +6,14 @@ Aplicação Next.js para gestão de insumos, controle de CMV e cardápio digital
 
 - Node.js 20.9 ou superior
 - Projeto Firebase com Authentication (e-mail/senha) e Cloud Firestore habilitados
-- Chave da API do Gemini configurada no ambiente server-side
+- Chave da API da xAI configurada no ambiente server-side
 
 ## Desenvolvimento local
 
 1. Instale as dependências com `npm install`.
 2. Copie `.env.example` para `.env.local` e preencha as configurações Web do Firebase.
 3. Configure as credenciais do Firebase Admin para as rotas financeiras: use Application Default Credentials no ambiente local ou defina `FIREBASE_ADMIN_SERVICE_ACCOUNT` com o JSON da conta de serviço no ambiente de execução. Nunca use prefixo `NEXT_PUBLIC_` nem salve a chave no repositório.
-4. Configure `GEMINI_API_KEY` no `.env.local` (sem `NEXT_PUBLIC_`) e, se necessário, ajuste `GEMINI_MODEL` para um modelo disponível na sua conta Google AI.
+4. Configure `XAI_API_KEY` no `.env.local` (sem `NEXT_PUBLIC_`) e, se necessário, ajuste `XAI_MODEL` para um modelo disponível na sua conta xAI.
 5. Crie no Firebase Authentication os usuários autorizados a acessar o painel.
 6. Execute `npm run dev` e acesse `http://localhost:3000`. Revise a migração e as regras por loja abaixo antes de publicar regras no Firebase.
 
@@ -52,7 +52,7 @@ O cardápio público exige um link com o ID da loja, no formato `/menu?loja=gute
 
 Em `/admin/fichas-tecnicas`, selecione um produto e vincule insumos, quantidades, rendimento, preço de venda e meta de CMV ou margem. As gravações passam por uma rota autenticada com Firebase Admin; a composição fica em `fichasTecnicas` e custos/metas em `fichaTecnicaFinancas` e `produtoCustos`. O perfil `kitchen_bar` pode editar a composição, mas não recebe nem envia dados financeiros.
 
-Em `/admin/compras`, notas fiscais e cardápios podem ser lidos por OCR; a imagem é processada temporariamente no servidor e não é salva no Storage. O endpoint valida o token e o perfil no Firestore antes de usar Gemini. Revise todos os campos antes de confirmar. A confirmação da nota também usa uma rota autenticada no servidor: itens `insumo_producao` atualizam estoque, custo unitário privado e fichas vinculadas; `compra_geral` afeta somente o histórico financeiro. Produtos de cardápio importados são gravados em `items` para revisão, sem publicação automática.
+Em `/admin/compras`, notas fiscais e cardápios podem ser lidos por OCR; a imagem é processada temporariamente no servidor e não é salva no Storage. O endpoint valida o token e o perfil no Firestore antes de usar a API da xAI (Grok). Imagens WebP são convertidas para PNG no navegador; revise todos os campos antes de confirmar. A confirmação da nota também usa uma rota autenticada no servidor: itens `insumo_producao` atualizam estoque, custo unitário privado e fichas vinculadas; `compra_geral` afeta somente o histórico financeiro. Produtos de cardápio importados são gravados em `items` para revisão, sem publicação automática.
 
 ### Migração dos dados existentes
 

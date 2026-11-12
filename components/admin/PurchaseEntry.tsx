@@ -123,6 +123,35 @@ function toBase64(bytes: ArrayBuffer): string {
   return btoa(binary);
 }
 
+async function toProviderImage(file: File): Promise<File> {
+  if (file.type !== "image/webp") return file;
+  const image = await createImageBitmap(file);
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Não foi possível converter a imagem WebP.");
+    context.drawImage(image, 0, 0);
+    const png = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error("Não foi possível converter a imagem WebP."));
+      }, "image/png");
+    });
+    if (png.size > MAX_IMAGE_SIZE) {
+      throw new Error("A imagem convertida excede o limite de 10 MB.");
+    }
+    return new File(
+      [png],
+      file.name.replace(/\.webp$/i, ".png"),
+      { type: "image/png" },
+    );
+  } finally {
+    image.close();
+  }
+}
+
 function emptyImport(): ImportData {
   return { fornecedor: "", numeroNota: "", dataEmissao: "", itens: [] };
 }
@@ -352,6 +381,7 @@ export function PurchaseEntry({
       if (!user || user.uid !== usuarioId) {
         throw new Error("Sua sessão expirou. Entre novamente para continuar.");
       }
+      const providerImage = await toProviderImage(file);
       const headers = new Headers({
         Authorization: `Bearer ${await user.getIdToken()}`,
       });
@@ -359,14 +389,14 @@ export function PurchaseEntry({
       if (activeType === "menu") {
         const formData = new FormData();
         formData.append("importType", "menu");
-        formData.append("image", file, file.name);
+        formData.append("image", providerImage, providerImage.name);
         requestBody = formData;
       } else {
         headers.set("Content-Type", "application/json");
         requestBody = JSON.stringify({
           importType: activeType,
-          mimeType: file.type,
-          imageBase64: toBase64(await file.arrayBuffer()),
+          mimeType: providerImage.type,
+          imageBase64: toBase64(await providerImage.arrayBuffer()),
         });
       }
       const response = await fetch("/api/ocr", {
@@ -409,7 +439,7 @@ export function PurchaseEntry({
             : "";
         const diagnosticStatus =
           diagnostic?.status !== undefined
-            ? ` (HTTP ${response.status}, status Gemini ${diagnostic.status})`
+            ? ` (HTTP ${response.status}, status do provedor ${diagnostic.status})`
             : ` (HTTP ${response.status})`;
         throw new Error(`${apiError}${diagnosticStatus}${diagnosticMessage}`);
       }
@@ -633,7 +663,7 @@ export function PurchaseEntry({
 
       <section className="panel ocr-upload-panel">
         <div className="panel-body">
-          <div className="eyebrow">Importação OCR · Gemini Flash</div>
+          <div className="eyebrow">Importação OCR · Grok</div>
           <h2 className="purchase-upload-title">
             Importar {activeType === "invoice" ? "nota fiscal" : "cardápio"}
           </h2>
@@ -713,7 +743,7 @@ export function PurchaseEntry({
 
       {busy ? (
         <div aria-live="polite" className="panel loading-state">
-          Enviando imagem ao Gemini e estruturando os dados…
+          Enviando imagem ao Grok e estruturando os dados…
         </div>
       ) : null}
 
