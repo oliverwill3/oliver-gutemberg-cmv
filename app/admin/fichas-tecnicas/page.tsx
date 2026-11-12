@@ -9,6 +9,10 @@ import {
 import { useEffect, useState } from "react";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { RecipeManager } from "@/components/admin/RecipeManager";
+import {
+  canAccessAdminPath,
+  canReadFinancialData,
+} from "@/lib/auth/permissions";
 import { getFirebaseServices, isFirebaseConfigured } from "@/lib/firebase";
 import {
   observarFichasTecnicas,
@@ -18,6 +22,7 @@ import {
   type FichaTecnicaInput,
 } from "@/lib/firestore/fichas-tecnicas";
 import { observarInsumos } from "@/lib/firestore/insumos";
+import { useAdminProfile } from "@/hooks/useAdminProfile";
 import type { FichaTecnica, Insumo, Produto } from "@/types";
 
 function getErrorMessage(error: unknown) {
@@ -35,6 +40,8 @@ export default function FichasTecnicasPage() {
   const [fichas, setFichas] = useState<FichaTecnica[] | null>(null);
   const [dataError, setDataError] = useState("");
   const [busy, setBusy] = useState(false);
+  const { profile, loading: profileLoading, error: profileError } =
+    useAdminProfile(user);
 
   useEffect(() => {
     if (!isFirebaseConfigured) return;
@@ -45,6 +52,9 @@ export default function FichasTecnicasPage() {
         auth,
         (currentUser) => {
           setUser(currentUser);
+          setProducts(null);
+          setInsumos(null);
+          setFichas(null);
           if (currentUser) setDataError("");
           setAuthLoading(false);
         },
@@ -62,20 +72,30 @@ export default function FichasTecnicasPage() {
   }, []);
 
   useEffect(() => {
-    if (!user || !isFirebaseConfigured) return;
+    if (
+      !user ||
+      !profile ||
+      !canAccessAdminPath("/admin/fichas-tecnicas", profile.role) ||
+      !isFirebaseConfigured
+    ) return;
 
     try {
       const stopInsumos = observarInsumos(
+        profile.storeId,
         setInsumos,
         (error) => setDataError(getErrorMessage(error)),
+        canReadFinancialData(profile.role),
       );
       const stopProdutos = observarProdutos(
+        profile.storeId,
         setProducts,
         (error) => setDataError(getErrorMessage(error)),
       );
       const stopFichas = observarFichasTecnicas(
+        profile.storeId,
         setFichas,
         (error) => setDataError(getErrorMessage(error)),
+        canReadFinancialData(profile.role),
       );
       return () => {
         stopInsumos();
@@ -87,7 +107,7 @@ export default function FichasTecnicasPage() {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setDataError(getErrorMessage(error));
     }
-  }, [user]);
+  }, [user, profile]);
 
   async function handleLogin(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -115,19 +135,23 @@ export default function FichasTecnicasPage() {
     }
   }
 
-  async function handleSave(input: FichaTecnicaInput) {
+  async function handleSave(
+    input: Omit<FichaTecnicaInput, "storeId">,
+  ) {
+    if (!profile) return;
     setBusy(true);
     try {
-      await salvarFichaTecnica(input);
+      await salvarFichaTecnica({ ...input, storeId: profile.storeId });
     } finally {
       setBusy(false);
     }
   }
 
   async function handleDelete(produtoId: string) {
+    if (!profile) return;
     setBusy(true);
     try {
-      await removerFichaTecnica(produtoId);
+      await removerFichaTecnica(produtoId, profile.storeId);
     } finally {
       setBusy(false);
     }
@@ -199,11 +223,31 @@ export default function FichasTecnicasPage() {
     );
   }
 
+  if (profileLoading) {
+    return <div className="loading-state">Carregando seu perfil de acesso…</div>;
+  }
+
+  if (!profile) {
+    return (
+      <AdminShell
+        onSignOut={handleSignOut}
+        profile={null}
+        userEmail={user.email ?? "Administrador"}
+      >
+        <div className="notice error">{profileError}</div>
+      </AdminShell>
+    );
+  }
+
   const dataLoading =
     (products === null || insumos === null || fichas === null) && !dataError;
 
   return (
-    <AdminShell onSignOut={handleSignOut} userEmail={user.email ?? "Administrador"}>
+    <AdminShell
+      onSignOut={handleSignOut}
+      profile={profile}
+      userEmail={user.email ?? "Administrador"}
+    >
       <div className="page-heading">
         <div>
           <div className="eyebrow">Fase 2 · Engenharia de cardápio</div>
@@ -221,6 +265,7 @@ export default function FichasTecnicasPage() {
       ) : (
         <RecipeManager
           busy={busy}
+          canViewCosts={canReadFinancialData(profile.role)}
           fichas={fichas ?? []}
           insumos={insumos ?? []}
           onDelete={handleDelete}

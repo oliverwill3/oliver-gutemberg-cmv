@@ -12,10 +12,10 @@ Aplicação Next.js para gestão de insumos, controle de CMV e cardápio digital
 
 1. Instale as dependências com `npm install`.
 2. Copie `.env.example` para `.env.local` e preencha as configurações Web do Firebase.
-3. Configure `GEMINI_API_KEY` no `.env.local` (sem `NEXT_PUBLIC_`) e, se necessário, ajuste `GEMINI_MODEL` para um modelo disponível na sua conta Google AI.
-4. Crie no Firebase Authentication os usuários autorizados a acessar o painel.
-5. Publique as regras do Firestore com `firebase deploy --only firestore:rules`.
-6. Execute `npm run dev` e acesse `http://localhost:3000`.
+3. Configure as credenciais do Firebase Admin para as rotas financeiras: use Application Default Credentials no ambiente local ou defina `FIREBASE_ADMIN_SERVICE_ACCOUNT` com o JSON da conta de serviço no ambiente de execução. Nunca use prefixo `NEXT_PUBLIC_` nem salve a chave no repositório.
+4. Configure `GEMINI_API_KEY` no `.env.local` (sem `NEXT_PUBLIC_`) e, se necessário, ajuste `GEMINI_MODEL` para um modelo disponível na sua conta Google AI.
+5. Crie no Firebase Authentication os usuários autorizados a acessar o painel.
+6. Execute `npm run dev` e acesse `http://localhost:3000`. Revise a migração e as regras por loja abaixo antes de publicar regras no Firebase.
 
 O painel inicial abre em `/admin/insumos`. A tela usa o Firebase Authentication e atualiza os insumos em tempo real pelo Firestore. A lista compartilhada fica em `/admin/lista-compras`.
 
@@ -27,36 +27,46 @@ O fator de correção é informado como um multiplicador igual ou maior que 1. O
 
 Por exemplo, fator `1,25` eleva em 25% o custo unitário para refletir perdas no preparo. O valor deve ser calculado na mesma unidade usada para a quantidade comprada.
 
-## Dados no Firestore
+## Dados, lojas e permissões
 
-- `insumos`: cadastro operacional, acessível somente a usuários autenticados.
-- `fichasTecnicas`: receitas por produto, rendimento, CMV/margem alvo e custo calculado, acessível somente a usuários autenticados.
-- `produtoCustos`: indicadores de custo, CMV, margem e preço sugerido, acessíveis somente a usuários autenticados.
-- `compras`: notas em revisão e compras confirmadas, acessíveis apenas ao usuário que as enviou.
-- `invoices`: cópia estruturada das notas fiscais confirmadas, acessível apenas ao usuário que as enviou.
-- `items`: produtos importados do cardápio aguardando revisão, acessíveis apenas ao usuário que os importou.
-- `produtos`: produtos publicados para a tela `/menu`.
-- `userProfiles/{uid}`: perfil operacional de cada conta, com `role` e `storeId`; os usuários podem ler somente o próprio perfil e não podem alterá-lo pelo aplicativo.
-- `stores/{storeId}/purchaseLists/current/items/{itemId}`: solicitações e sugestões de compra compartilhadas dentro de uma loja. Itens existentes entram como `requested`; itens novos exigem aprovação de `owner`, `manager` ou `super_admin` para passar a `approved`. Aprovar apenas libera o item para compra, não lança compra nem movimenta estoque.
-- Cada documento de `produtos` pode ter `ordem` para ordenar os itens dentro da sua categoria; `/admin/cardapio` atualiza essa posição e `/menu` respeita a ordem gravada.
-Em `/admin/fichas-tecnicas`, selecione um produto existente, informe insumos e quantidades na unidade cadastrada, rendimento e preço de venda. A ficha recalcula os custos com os preços atuais dos insumos, sugere um preço conforme a meta de CMV ou margem e grava os indicadores em `produtoCustos`, uma coleção privada. Isso evita expor custos, CMV e margens na coleção pública de produtos usada pelo cardápio.
+Os documentos de `insumos`, `produtos`, `categorias`, `fichasTecnicas`, `produtoCustos`, `compras`, `invoices`, `items` e `signage` pertencem a uma loja e devem conter `storeId`. As consultas do painel filtram por esse campo; as regras do Firestore também verificam o perfil e o papel, pois as regras não filtram resultados de consultas.
 
-Em `/admin/compras`, escolha nota fiscal ou cardápio e envie uma imagem JPEG, PNG ou WebP de até 10 MB. Para cardápios também é possível colar texto bruto, que é enviado como JSON ao endpoint `app/api/ocr/route.ts`. A imagem não é armazenada no Firebase Storage. O endpoint verifica o token do Firebase Authentication e chama o modelo indicado por `GEMINI_MODEL` (padrão `gemini-3.8-flash`) com JSON estruturado. Revise nome, preço e categoria na tabela antes de confirmar; nada é gravado no Firestore até essa confirmação.
+| Papel | Permissões |
+| --- | --- |
+| `super_admin` | Operações permitidas em todas as lojas nas regras; o painel usa o `storeId` do perfil ativo. |
+| `owner`, `manager` | Gestão da loja, incluindo cardápio, insumos, compras, fichas e aprovações. |
+| `purchasing` | Insumos, compras/notas, OCR, atualização dos dados de compra, baixa como comprado e importação de vendas semanais. |
+| `kitchen_bar` | Consulta de insumos, edição de fichas técnicas e inclusão de solicitações na lista compartilhada. |
 
-Todos os itens de notas precisam de classificação. Itens `insumo_producao` também precisam ser vinculados a um insumo existente e informar quantidade/unidade compatíveis; ao confirmar, somam ao estoque, atualizam o custo unitário corrigido e recalculam fichas/produtos associados. Unidades de massa e volume são convertidas entre kg/g e L/ml. Itens `compra_geral` são registrados somente no histórico financeiro e não alteram insumos nem fichas. Produtos importados do cardápio são gravados em `items` com status de revisão, sem publicação automática. Se o OCR falhar, os campos podem ser preenchidos manualmente. A chave do Gemini não é enviada ao navegador.
+`userProfiles/{uid}` contém `role` e `storeId`; o próprio usuário pode ler o perfil, mas não alterá-lo pelo aplicativo. Crie e administre esses perfis pelo Firebase Console. Itens novos da lista compartilhada aguardam aprovação de `owner`, `manager` ou `super_admin`; aprovação não lança compra nem movimenta estoque.
 
-### Cadastro de acessos e lista colaborativa
+### Lista de compras e previsão semanal
 
-1. No Firebase Console, abra **Authentication → Usuários → Adicionar usuário** e crie a conta com e-mail e senha. Não compartilhe a senha com o aplicativo nem a inclua no repositório.
-2. Copie o **UID** exibido para essa conta e abra **Firestore Database → Dados**.
-3. Crie a coleção `userProfiles`; use o UID exatamente como ID do documento. Adicione os campos string `role` e `storeId`.
-4. Use um dos papéis `super_admin`, `owner`, `manager`, `purchasing` ou `kitchen_bar`. Defina o mesmo `storeId` (por exemplo, um slug como `gutemberg-lounge`) para as pessoas da mesma unidade. Para o primeiro acesso à lista, o app cria `stores/{storeId}/purchaseLists/current`.
-5. Publique as regras locais somente depois de revisar o arquivo `firestore.rules` e confirmar que o projeto Firebase selecionado é o correto. Pela CLI: `firebase deploy --only firestore:rules`.
+Em `/admin/lista-compras`, todos os papéis da loja podem incluir solicitações; compras, gestores e administradores podem registrar comentários/valores e marcar itens como comprados. Nenhum papel pode excluir itens. Marcar como comprado registra status, usuário e data, mas não altera o estoque; a entrada continua sendo feita no recebimento da compra.
 
-Na lista de compras, cozinha/bar e compras podem incluir insumos existentes e solicitar itens novos; itens novos ficam pendentes para decisão de proprietário/gerente. A geração automática usa a diferença entre estoque registrado e `estoqueMinimo`; não usa vendas históricas e não envia pedidos automaticamente.
+Owner, manager, purchasing ou super_admin podem importar um CSV com cabeçalhos `produto` e `quantidade` (separador vírgula, ponto e vírgula ou tabulação). Os nomes dos produtos devem corresponder aos nomes do cardápio; diferenças de maiúsculas e acentos são ignoradas. A data informada deve ser uma segunda-feira. Importar novamente a mesma semana substitui o relatório anterior. Os quatro relatórios semanais mais recentes alimentam a média de consumo.
 
-**Limite de segurança atual:** o perfil e as regras por loja protegem `userProfiles` e a nova lista colaborativa. As coleções antigas de insumos, fichas e produtos ainda têm regras mais amplas para qualquer usuário autenticado e não estão isoladas por `storeId`. Portanto, não cadastre usuários de equipe no projeto de produção nem trate o RBAC como completo antes de restringir/migrar também essas coleções. O arquivo local de regras pode também divergir das regras publicadas no Console; confirme a versão ativa antes de implantação.
+A quantidade sugerida é `máximo(0, estoque mínimo + consumo médio semanal - estoque atual)`. O consumo é derivado das fichas técnicas como `quantidade do insumo na ficha × unidades vendidas / rendimento da ficha`. Produtos sem ficha técnica e componentes cuja unidade não corresponda à unidade do insumo não entram no cálculo; revise o cadastro antes de confiar nas sugestões. Sem vendas importadas, a lista usa apenas o estoque mínimo. Sugestões são solicitações na lista, não pedidos de compra nem movimentações de estoque.
 
-Se uma versão anterior do painel gravou campos de CMV/custo diretamente em documentos de `produtos`, reabra e salve as fichas correspondentes para migrar esses indicadores para `produtoCustos` e remover os campos antigos do documento público.
+O cardápio público exige um link com o ID da loja, no formato `/menu?loja=gutemberg-loung`. Ele só consulta produtos disponíveis daquela loja. Não coloque custo, CMV ou margem em documentos públicos de `produtos`.
 
-As regras iniciais permitem que qualquer conta autenticada altere dados administrativos. Antes de publicar, restrinja as gravações aos administradores (por exemplo, com custom claims) e revise as regras conforme o perfil de cada usuário. As chaves Web do Firebase não substituem regras de segurança.
+Em `/admin/fichas-tecnicas`, selecione um produto e vincule insumos, quantidades, rendimento, preço de venda e meta de CMV ou margem. As gravações passam por uma rota autenticada com Firebase Admin; a composição fica em `fichasTecnicas` e custos/metas em `fichaTecnicaFinancas` e `produtoCustos`. O perfil `kitchen_bar` pode editar a composição, mas não recebe nem envia dados financeiros.
+
+Em `/admin/compras`, notas fiscais e cardápios podem ser lidos por OCR; a imagem é processada temporariamente no servidor e não é salva no Storage. O endpoint valida o token e o perfil no Firestore antes de usar Gemini. Revise todos os campos antes de confirmar. A confirmação da nota também usa uma rota autenticada no servidor: itens `insumo_producao` atualizam estoque, custo unitário privado e fichas vinculadas; `compra_geral` afeta somente o histórico financeiro. Produtos de cardápio importados são gravados em `items` para revisão, sem publicação automática.
+
+### Migração dos dados existentes
+
+Antes de habilitar usuários de outras lojas ou publicar as regras novas:
+
+1. Confirme no Firebase Console que os documentos existentes nas coleções de raiz realmente pertencem à loja `gutemberg-loung`. A migração interrompe sem gravar se encontrar documentos já associados a outro `storeId`.
+2. Configure credenciais administrativas locais via Application Default Credentials (`gcloud auth application-default login`) ou outra credencial Google autorizada para o projeto. Nunca adicione credenciais ao repositório.
+3. Faça primeiro a simulação: `npm run migrate:store -- --project oliver-gutemberg-cmv --store-id gutemberg-loung`.
+4. Revise as contagens e aplique apenas quando estiverem corretas: `npm run migrate:store -- --project oliver-gutemberg-cmv --store-id gutemberg-loung --apply`.
+5. O script também remove campos antigos de custo/CMV/margem dos documentos públicos em `produtos`. Ele é idempotente e pode ser executado novamente se uma execução for interrompida.
+6. Rode `npm run test:rules`; depois revise `firestore.rules`, `storage.rules` e o projeto Firebase selecionado antes de publicar manualmente regras e índices.
+
+O script também separa os campos financeiros legados de `insumos` e `fichasTecnicas`, calcula/preenche os documentos privados `insumoFinancas`, `fichaTecnicaFinancas` e `produtoCustos`, remove custos dos documentos operacionais e adiciona `storeId`. Faça backup e revise a simulação completa antes de executar com `--apply`. Não publique as regras restritas antes de confirmar que a migração terminou e que os custos podem ser lidos pelos perfis de gestão.
+
+`npm run test:rules` inicia o emulador local do Firestore; não publica regras nem altera dados remotos. O usuário responsável pela hospedagem/publicação deve conferir o projeto selecionado no Firebase CLI antes de qualquer deploy.
+
+Se uma versão anterior do painel gravou indicadores de CMV em `produtos`, confirme que a simulação da migração identifica esses documentos para remoção antes de liberar o cardápio público.

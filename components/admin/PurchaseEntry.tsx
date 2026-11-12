@@ -242,10 +242,12 @@ function HistoryList({ purchases }: { purchases: Compra[] }) {
 }
 
 export function PurchaseEntry({
+  storeId,
   usuarioId,
   insumos,
   purchases,
 }: {
+  storeId: string;
   usuarioId: string;
   insumos: Insumo[];
   purchases: Compra[];
@@ -586,10 +588,11 @@ export function PurchaseEntry({
           nomeArquivo: filename || "Lançamento manual",
           itens: data.itens.map(invoiceItem),
         };
-        await confirmarCompra(usuarioId, input);
+        await confirmarCompra(storeId, input);
         setNotice("Nota confirmada. Estoque e fichas impactadas foram atualizados.");
       } else {
         await importarItensCardapio(
+          storeId,
           usuarioId,
           data.itens.map(menuItem),
         );

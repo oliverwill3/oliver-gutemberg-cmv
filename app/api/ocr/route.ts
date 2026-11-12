@@ -37,20 +37,56 @@ function stringValue(value: unknown): string {
   return "";
 }
 
-async function authenticate(request: NextRequest): Promise<boolean> {
-  if (!firebaseProjectId) return false;
+interface AuthenticatedUser {
+  uid: string;
+  role: string;
+}
+
+async function authenticate(
+  request: NextRequest,
+): Promise<AuthenticatedUser | null> {
+  if (!firebaseProjectId) return null;
   const authorization = request.headers.get("authorization");
-  if (!authorization?.startsWith("Bearer ")) return false;
+  if (!authorization?.startsWith("Bearer ")) return null;
+  const token = authorization.slice(7);
+  let uid: string;
   try {
-    await jwtVerify(authorization.slice(7), firebaseKeys, {
+    const { payload } = await jwtVerify(token, firebaseKeys, {
       algorithms: ["RS256"],
       issuer: `https://securetoken.google.com/${firebaseProjectId}`,
       audience: firebaseProjectId,
     });
-    return true;
+    if (typeof payload.sub !== "string") return null;
+    uid = payload.sub;
   } catch {
-    return false;
+    return null;
   }
+
+  const profilePaths = ["userProfiles", "Usuarios"];
+  let profileDocument: unknown = null;
+  for (const collectionName of profilePaths) {
+    const response = await fetch(
+      `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseProjectId)}/databases/(default)/documents/${collectionName}/${encodeURIComponent(uid)}`,
+      {
+        headers: { authorization: `Bearer ${token}` },
+        cache: "no-store",
+      },
+    );
+    if (response.ok) {
+      profileDocument = await response.json();
+      break;
+    }
+    if (response.status !== 404) return null;
+  }
+  if (!profileDocument) return null;
+  if (!isRecord(profileDocument) || !isRecord(profileDocument.fields)) {
+    return null;
+  }
+  const roleField = profileDocument.fields.role;
+  if (!isRecord(roleField) || typeof roleField.stringValue !== "string") {
+    return null;
+  }
+  return { uid, role: roleField.stringValue };
 }
 
 async function readJsonBody(request: NextRequest): Promise<unknown> {
@@ -286,8 +322,23 @@ function safeErrorDetails(error: unknown, apiKey: string) {
 }
 
 export async function POST(request: NextRequest) {
-  if (!(await authenticate(request))) {
+  let user: AuthenticatedUser | null;
+  try {
+    user = await authenticate(request);
+  } catch {
+    return NextResponse.json(
+      { error: "Não foi possível verificar o perfil operacional." },
+      { status: 503 },
+    );
+  }
+  if (!user) {
     return NextResponse.json({ error: "Autenticação necessária." }, { status: 401 });
+  }
+  if (!["super_admin", "owner", "manager", "purchasing"].includes(user.role)) {
+    return NextResponse.json(
+      { error: "Seu perfil não pode usar a importação OCR." },
+      { status: 403 },
+    );
   }
 
   const apiKey = process.env.GEMINI_API_KEY;

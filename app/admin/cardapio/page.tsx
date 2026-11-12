@@ -9,12 +9,14 @@ import {
 import { useEffect, useState } from "react";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { MenuProductManager } from "@/components/admin/MenuProductManager";
+import { canAccessAdminPath } from "@/lib/auth/permissions";
 import { getFirebaseServices, isFirebaseConfigured } from "@/lib/firebase";
 import {
   observarProdutosCardapio,
   salvarOrdemProdutos,
 } from "@/lib/firestore/cardapio";
 import type { Produto } from "@/types";
+import { useAdminProfile } from "@/hooks/useAdminProfile";
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Ocorreu um erro inesperado.";
@@ -50,6 +52,8 @@ export default function AdminCardapioPage() {
   const [dataError, setDataError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const { profile, loading: profileLoading, error: profileError } =
+    useAdminProfile(user);
 
   useEffect(() => {
     if (!isFirebaseConfigured) return;
@@ -76,9 +80,15 @@ export default function AdminCardapioPage() {
   }, []);
 
   useEffect(() => {
-    if (!user || !isFirebaseConfigured) return;
+    if (
+      !user ||
+      !profile ||
+      !canAccessAdminPath("/admin/cardapio", profile.role) ||
+      !isFirebaseConfigured
+    ) return;
     try {
       return observarProdutosCardapio(
+        profile.storeId,
         setProducts,
         (error) => setDataError(getErrorMessage(error)),
       );
@@ -87,7 +97,7 @@ export default function AdminCardapioPage() {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setDataError(getErrorMessage(error));
     }
-  }, [user]);
+  }, [user, profile]);
 
   async function handleLogin(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -136,7 +146,8 @@ export default function AdminCardapioPage() {
     setNotice("");
     setDataError("");
     try {
-      await salvarOrdemProdutos(reordered);
+      if (!profile) return;
+      await salvarOrdemProdutos(profile.storeId, reordered);
       setNotice(`Ordem da categoria “${category}” atualizada.`);
     } catch (error) {
       setDataError(getErrorMessage(error));
@@ -211,9 +222,26 @@ export default function AdminCardapioPage() {
     );
   }
 
+  if (profileLoading) {
+    return <div className="loading-state">Carregando seu perfil de acesso…</div>;
+  }
+
+  if (!profile) {
+    return (
+      <AdminShell
+        onSignOut={handleSignOut}
+        profile={null}
+        userEmail={user.email ?? "Administrador"}
+      >
+        <div className="notice error">{profileError}</div>
+      </AdminShell>
+    );
+  }
+
   return (
     <AdminShell
       onSignOut={handleSignOut}
+      profile={profile}
       userEmail={user.email ?? "Administrador"}
     >
       <div className="page-heading">

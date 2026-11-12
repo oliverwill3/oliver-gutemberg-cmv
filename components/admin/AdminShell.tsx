@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
+import { canAccessAdminPath } from "@/lib/auth/permissions";
+import type { UserProfile } from "@/types";
 
 const navigation = [
   { href: "/admin/insumos", label: "Insumos" },
@@ -16,12 +18,22 @@ export function AdminShell({
   children,
   userEmail,
   onSignOut,
+  profile,
 }: {
   children: ReactNode;
   userEmail?: string;
   onSignOut?: () => void;
+  profile?: UserProfile | null;
 }) {
   const pathname = usePathname();
+  const visibleNavigation =
+    profile === undefined
+      ? navigation
+      : profile
+        ? navigation.filter((item) => canAccessAdminPath(item.href, profile.role))
+        : [];
+  const canOpenCurrentPath =
+    !profile || canAccessAdminPath(pathname, profile.role);
 
   return (
     <div className="admin-shell">
@@ -33,7 +45,7 @@ export function AdminShell({
         </Link>
         <div className="nav-label">Operação</div>
         <nav className="nav-list" aria-label="Navegação administrativa">
-          {navigation.map((item) => (
+          {visibleNavigation.map((item) => (
             <Link
               className={`nav-link${pathname === item.href ? " active" : ""}`}
               href={item.href}
@@ -42,18 +54,21 @@ export function AdminShell({
               {item.label}
             </Link>
           ))}
-          <Link
-            className={`nav-link${pathname.startsWith("/admin/configuracoes") ? " active" : ""}`}
-            href="/admin/configuracoes"
-          >
-            Configurações
-          </Link>
+          {(!profile ||
+            canAccessAdminPath("/admin/configuracoes", profile.role)) && (
+            <Link
+              className={`nav-link${pathname.startsWith("/admin/configuracoes") ? " active" : ""}`}
+              href="/admin/configuracoes"
+            >
+              Configurações
+            </Link>
+          )}
         </nav>
         <div className="nav-label">Cliente</div>
         <nav className="nav-list" aria-label="Módulos de cliente">
           <Link
             className="nav-link"
-            href="/menu"
+            href={profile ? `/menu?loja=${encodeURIComponent(profile.storeId)}` : "/menu"}
             rel="noopener noreferrer"
             target="_blank"
           >
@@ -81,7 +96,15 @@ export function AdminShell({
             <span className="status">Ambiente de gestão</span>
           )}
         </header>
-        <main className="content">{children}</main>
+        <main className="content">
+          {canOpenCurrentPath ? (
+            children
+          ) : (
+            <div className="notice error" role="alert">
+              Seu perfil não tem permissão para acessar esta área.
+            </div>
+          )}
+        </main>
       </div>
     </div>
   );

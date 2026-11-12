@@ -35,6 +35,7 @@ export function RecipeManager({
   products,
   insumos,
   fichas,
+  canViewCosts,
   onSave,
   onDelete,
   busy,
@@ -42,7 +43,8 @@ export function RecipeManager({
   products: Produto[];
   insumos: Insumo[];
   fichas: FichaTecnica[];
-  onSave: (input: FichaTecnicaInput) => Promise<void>;
+  canViewCosts: boolean;
+  onSave: (input: Omit<FichaTecnicaInput, "storeId">) => Promise<void>;
   onDelete: (produtoId: string) => Promise<void>;
   busy: boolean;
 }) {
@@ -104,6 +106,7 @@ export function RecipeManager({
           onDelete={() => onDelete(selectedProduct.id)}
           onSave={onSave}
           product={selectedProduct}
+          canViewCosts={canViewCosts}
         />
       ) : null}
     </>
@@ -117,13 +120,15 @@ function RecipeEditor({
   onSave,
   onDelete,
   busy,
+  canViewCosts,
 }: {
   product: Produto;
   insumos: Insumo[];
   ficha?: FichaTecnica;
-  onSave: (input: FichaTecnicaInput) => Promise<void>;
+  onSave: (input: Omit<FichaTecnicaInput, "storeId">) => Promise<void>;
   onDelete: () => Promise<void>;
   busy: boolean;
+  canViewCosts: boolean;
 }) {
   const [lines, setLines] = useState(
     () =>
@@ -161,12 +166,16 @@ function RecipeEditor({
         insumoNome: insumo.nome,
         quantidade: quantity,
         unidade: insumo.unidade,
-        custoUnitario: insumo.custoUnitario,
-        custoTotal: insumo.custoUnitario * quantity,
+        ...(canViewCosts
+          ? {
+              custoUnitario: insumo.custoUnitario ?? 0,
+              custoTotal: (insumo.custoUnitario ?? 0) * quantity,
+            }
+          : {}),
       },
     ];
   });
-  const batchCost = calcularCustoTotalPrato(validItems);
+  const batchCost = canViewCosts ? calcularCustoTotalPrato(validItems) : 0;
   const portions = Number(yieldAmount);
   const portionCost =
     Number.isFinite(portions) && portions > 0 ? batchCost / portions : 0;
@@ -209,7 +218,6 @@ function RecipeEditor({
     try {
       await onSave({
         produto: product,
-        insumos,
         itens: lines
           .filter((line) => line.insumoId)
           .map((line) => ({
@@ -281,8 +289,8 @@ function RecipeEditor({
                 <tr>
                   <th>Insumo</th>
                   <th>Quantidade</th>
-                  <th>Custo unitário</th>
-                  <th>Custo na receita</th>
+                  {canViewCosts ? <th>Custo unitário</th> : null}
+                  {canViewCosts ? <th>Custo na receita</th> : null}
                   <th aria-label="Ações" />
                 </tr>
               </thead>
@@ -292,7 +300,7 @@ function RecipeEditor({
                   const quantity = Number(line.quantidade);
                   const lineCost =
                     ingredient && Number.isFinite(quantity) && quantity > 0
-                      ? ingredient.custoUnitario * quantity
+                      ? (ingredient.custoUnitario ?? 0) * quantity
                       : 0;
                   return (
                     <tr key={`${index}-${line.insumoId}`}>
@@ -337,12 +345,16 @@ function RecipeEditor({
                           <span>{ingredient?.unidade ?? "—"}</span>
                         </div>
                       </td>
-                      <td>
-                        {ingredient
-                          ? `${currency.format(ingredient.custoUnitario)} / ${ingredient.unidade}`
-                          : "—"}
-                      </td>
-                      <td>{currency.format(lineCost)}</td>
+                      {canViewCosts ? (
+                        <>
+                          <td>
+                            {ingredient
+                              ? `${currency.format(ingredient.custoUnitario ?? 0)} / ${ingredient.unidade}`
+                              : "—"}
+                          </td>
+                          <td>{currency.format(lineCost)}</td>
+                        </>
+                      ) : null}
                       <td>
                         <button
                           aria-label={`Remover insumo ${index + 1}`}
@@ -380,13 +392,15 @@ function RecipeEditor({
               value={yieldAmount}
             />
             <span className="field-hint">
-              O custo por porção é o custo de todos os insumos dividido pelo rendimento.
+              {canViewCosts
+                ? "O custo por porção é o custo dos insumos dividido pelo rendimento."
+                : "Informe o rendimento total desta receita."}
             </span>
           </div>
         </div>
       </section>
 
-      <section className="recipe-bottom-grid">
+      {canViewCosts ? <section className="recipe-bottom-grid">
         <div className="panel">
           <div className="panel-header">
             <h2 className="panel-title">Preço e meta</h2>
@@ -499,7 +513,12 @@ function RecipeEditor({
             ) : null}
           </div>
         </section>
-      </section>
+      </section> : (
+        <div className="notice">
+          Custos, metas de CMV e margens são restritos aos perfis de gestão e
+          compras.
+        </div>
+      )}
 
       {missingIngredient ? (
         <div className="notice error">

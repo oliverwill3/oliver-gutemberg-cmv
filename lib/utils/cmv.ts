@@ -23,7 +23,11 @@ export function calcularCustoUnitarioInsumo(
 
 export function calcularCustoTotalPrato(itens: ItemFichaTecnica[]): number {
   return itens.reduce((total, item) => {
-    if (!Number.isFinite(item.custoTotal) || item.custoTotal < 0) {
+    if (
+      typeof item.custoTotal !== "number" ||
+      !Number.isFinite(item.custoTotal) ||
+      item.custoTotal < 0
+    ) {
       throw new Error("Os custos dos itens da ficha técnica devem ser válidos.");
     }
     return total + item.custoTotal;
