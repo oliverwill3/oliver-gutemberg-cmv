@@ -1,16 +1,25 @@
-import { collection, doc, onSnapshot, writeBatch, type Unsubscribe } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  onSnapshot,
+  query,
+  where,
+  writeBatch,
+  type Unsubscribe,
+} from "firebase/firestore";
 import { getFirebaseServices } from "@/lib/firebase";
 import type { Produto } from "@/types";
 
 const MAX_BATCH_PRODUCTS = 450;
 
 export function observarProdutosCardapio(
+  storeId: string,
   onChange: (produtos: Produto[]) => void,
   onError: (error: Error) => void,
 ): Unsubscribe {
   const { db } = getFirebaseServices();
   return onSnapshot(
-    collection(db, "produtos"),
+    query(collection(db, "produtos"), where("storeId", "==", storeId)),
     (snapshot) => {
       onChange(
         snapshot.docs.map(
@@ -23,6 +32,7 @@ export function observarProdutosCardapio(
 }
 
 export async function salvarOrdemProdutos(
+  storeId: string,
   produtos: Pick<Produto, "id">[],
 ): Promise<void> {
   if (produtos.length === 0) return;
@@ -40,6 +50,7 @@ export async function salvarOrdemProdutos(
   const atualizadoEm = new Date().toISOString();
   produtos.forEach((produto, ordem) => {
     batch.update(doc(db, "produtos", produto.id), {
+      storeId,
       ordem,
       atualizadoEm,
     });

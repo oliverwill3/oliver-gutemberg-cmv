@@ -3,7 +3,10 @@ import {
   collection,
   doc,
   getDoc,
+  limit,
   onSnapshot,
+  orderBy,
+  query,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -12,10 +15,12 @@ import {
 } from "firebase/firestore";
 import { getFirebaseServices } from "@/lib/firebase";
 import type {
-  Insumo,
   PurchaseListItem,
   PurchaseListItemStatus,
+  VendaSemanalItem,
+  VendasSemanais,
 } from "@/types";
+import type { ItemReposicao } from "@/lib/utils/purchase-planning";
 
 const LIST_ID = "current";
 const MAX_SUGGESTIONS_PER_BATCH = 450;
@@ -81,6 +86,9 @@ export function observarItensListaCompras(
           revisadoEm: data.revisadoEm
             ? toIsoDate(data.revisadoEm)
             : undefined,
+          compradoEm: data.compradoEm
+            ? toIsoDate(data.compradoEm)
+            : undefined,
         } as PurchaseListItem;
       });
       items.sort((a, b) => a.criadoEm.localeCompare(b.criadoEm));
@@ -88,6 +96,92 @@ export function observarItensListaCompras(
     },
     onError,
   );
+}
+
+export function observarVendasSemanais(
+  storeId: string,
+  onChange: (reports: VendasSemanais[]) => void,
+  onError: (error: Error) => void,
+): Unsubscribe {
+  const { db } = getFirebaseServices();
+  return onSnapshot(
+    query(
+      collection(db, "stores", storeId, "weeklySales"),
+      orderBy("semanaInicio", "desc"),
+      limit(4),
+    ),
+    (snapshot) => {
+      onChange(
+        snapshot.docs.map((entry) => {
+          const data = entry.data();
+          return {
+            ...data,
+            id: entry.id,
+            importadoEm: toIsoDate(data.importadoEm),
+            itens: Array.isArray(data.itens)
+              ? (data.itens as VendaSemanalItem[])
+              : [],
+          } as VendasSemanais;
+        }),
+      );
+    },
+    onError,
+  );
+}
+
+export async function importarVendasSemanais({
+  storeId,
+  semanaInicio,
+  itens,
+  uid,
+  email,
+}: {
+  storeId: string;
+  semanaInicio: string;
+  itens: VendaSemanalItem[];
+  uid: string;
+  email: string;
+}): Promise<void> {
+  const parsedDate = new Date(`${semanaInicio}T00:00:00.000Z`);
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(semanaInicio) ||
+    Number.isNaN(parsedDate.getTime()) ||
+    parsedDate.toISOString().slice(0, 10) !== semanaInicio
+  ) {
+    throw new Error("Informe uma data válida para o início da semana.");
+  }
+  if (parsedDate.getUTCDay() !== 1) {
+    throw new Error("A data de início da semana deve ser uma segunda-feira.");
+  }
+  if (itens.length === 0 || itens.length > 300) {
+    throw new Error("O relatório deve conter entre 1 e 300 produtos.");
+  }
+  const productIds = new Set(itens.map((item) => item.produtoId));
+  if (
+    productIds.size !== itens.length ||
+    itens.some(
+      (item) =>
+        !item.produtoId ||
+        !item.produtoNome.trim() ||
+        !Number.isFinite(item.unidadesVendidas) ||
+        item.unidadesVendidas <= 0,
+    )
+  ) {
+    throw new Error("O relatório contém produtos ou quantidades inválidas.");
+  }
+
+  const { auth, db } = getFirebaseServices();
+  if (auth.currentUser?.uid !== uid) {
+    throw new Error("Sua sessão expirou. Entre novamente para continuar.");
+  }
+  await setDoc(doc(db, "stores", storeId, "weeklySales", semanaInicio), {
+    storeId,
+    semanaInicio,
+    itens,
+    importadoPor: uid,
+    importadoPorEmail: email,
+    importadoEm: serverTimestamp(),
+  });
 }
 
 export async function adicionarItemListaCompras({
@@ -146,35 +240,36 @@ export async function adicionarItemListaCompras({
   });
 }
 
-export async function gerarSugestoesEstoqueMinimo({
+export async function gerarSugestoesReposicao({
   storeId,
   uid,
   email,
-  insumos,
-  itensExistentes,
+  sugestoes,
 }: {
   storeId: string;
   uid: string;
   email: string;
-  insumos: Insumo[];
-  itensExistentes: PurchaseListItem[];
+  sugestoes: ItemReposicao[];
 }): Promise<number> {
-  const existingIngredientIds = new Set(
-    itensExistentes
-      .filter((item) => item.status !== "rejected")
-      .map((item) => item.insumoId)
-      .filter(Boolean),
-  );
-  const suggestions = insumos.filter(
-    (item) =>
-      Number.isFinite(item.estoqueMinimo) &&
-      (item.estoqueMinimo ?? 0) > 0 &&
-      (item.quantidadeEstoque ?? 0) < (item.estoqueMinimo ?? 0) &&
-      !existingIngredientIds.has(item.id),
-  );
-  if (suggestions.length === 0) return 0;
-  if (suggestions.length > MAX_SUGGESTIONS_PER_BATCH) {
+  if (sugestoes.length === 0) return 0;
+  if (sugestoes.length > MAX_SUGGESTIONS_PER_BATCH) {
     throw new Error("Gere no máximo 450 sugestões por vez.");
+  }
+  if (
+    sugestoes.some(
+      (item) =>
+        !item.insumoId ||
+        !item.nome.trim() ||
+        item.nome.length > 150 ||
+        !Number.isFinite(item.quantidade) ||
+        item.quantidade <= 0 ||
+        !item.unidade.trim() ||
+        !item.categoria.trim() ||
+        item.categoria.length > 100 ||
+        item.observacao.length > 500,
+    )
+  ) {
+    throw new Error("Uma ou mais sugestões de reposição são inválidas.");
   }
 
   const { db, auth } = getFirebaseServices();
@@ -182,26 +277,25 @@ export async function gerarSugestoesEstoqueMinimo({
     throw new Error("Sua sessão expirou. Entre novamente para continuar.");
   }
   const batch = writeBatch(db);
-  for (const ingredient of suggestions) {
+  for (const suggestion of sugestoes) {
     const ref = doc(itemsRef(storeId));
     batch.set(ref, {
-      nome: ingredient.nome,
-      quantidade:
-        (ingredient.estoqueMinimo ?? 0) - (ingredient.quantidadeEstoque ?? 0),
-      unidade: ingredient.unidade,
-      categoria: ingredient.categoria,
-      insumoId: ingredient.id,
+      nome: suggestion.nome,
+      quantidade: suggestion.quantidade,
+      unidade: suggestion.unidade,
+      categoria: suggestion.categoria,
+      insumoId: suggestion.insumoId,
       novoItem: false,
       origem: "automatico",
       status: "requested" satisfies PurchaseListItemStatus,
-      observacao: "Sugestão gerada a partir do estoque mínimo cadastrado.",
+      observacao: suggestion.observacao,
       criadoPor: uid,
       criadoPorEmail: email,
       criadoEm: serverTimestamp(),
     });
   }
   await batch.commit();
-  return suggestions.length;
+  return sugestoes.length;
 }
 
 export async function revisarItemListaCompras({
@@ -229,5 +323,64 @@ export async function revisarItemListaCompras({
     revisadoPorEmail: email,
     revisadoEm: serverTimestamp(),
     decisao: decisao.trim(),
+  });
+}
+
+export async function atualizarDetalhesCompraLista({
+  storeId,
+  itemId,
+  comentarioCompras,
+  valorUnitario,
+  valorTotal,
+  uid,
+}: {
+  storeId: string;
+  itemId: string;
+  comentarioCompras: string;
+  valorUnitario: number | null;
+  valorTotal: number | null;
+  uid: string;
+}): Promise<void> {
+  const { auth } = getFirebaseServices();
+  if (auth.currentUser?.uid !== uid) {
+    throw new Error("Sua sessão expirou. Entre novamente para continuar.");
+  }
+  if (comentarioCompras.length > 500) {
+    throw new Error("O comentário pode ter no máximo 500 caracteres.");
+  }
+  if (
+    [valorUnitario, valorTotal].some(
+      (value) => value !== null && (!Number.isFinite(value) || value < 0),
+    )
+  ) {
+    throw new Error("Os valores da compra não podem ser negativos.");
+  }
+  await updateDoc(doc(itemsRef(storeId), itemId), {
+    comentarioCompras: comentarioCompras.trim(),
+    valorUnitario,
+    valorTotal,
+  });
+}
+
+export async function marcarItemComoComprado({
+  storeId,
+  itemId,
+  uid,
+  email,
+}: {
+  storeId: string;
+  itemId: string;
+  uid: string;
+  email: string;
+}): Promise<void> {
+  const { auth } = getFirebaseServices();
+  if (auth.currentUser?.uid !== uid) {
+    throw new Error("Sua sessão expirou. Entre novamente para continuar.");
+  }
+  await updateDoc(doc(itemsRef(storeId), itemId), {
+    status: "purchased" satisfies PurchaseListItemStatus,
+    compradoPor: uid,
+    compradoPorEmail: email,
+    compradoEm: serverTimestamp(),
   });
 }

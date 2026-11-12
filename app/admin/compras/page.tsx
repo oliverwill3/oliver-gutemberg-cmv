@@ -9,9 +9,11 @@ import {
 import { useEffect, useState } from "react";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { PurchaseEntry } from "@/components/admin/PurchaseEntry";
+import { canAccessAdminPath } from "@/lib/auth/permissions";
 import { getFirebaseServices, isFirebaseConfigured } from "@/lib/firebase";
 import { observarCompras } from "@/lib/firestore/compras";
 import { observarInsumos } from "@/lib/firestore/insumos";
+import { useAdminProfile } from "@/hooks/useAdminProfile";
 import type { Compra, Insumo } from "@/types";
 
 function messageFrom(error: unknown) {
@@ -28,6 +30,8 @@ export default function ComprasPage() {
   const [purchases, setPurchases] = useState<Compra[] | null>(null);
   const [dataError, setDataError] = useState("");
   const [busy, setBusy] = useState(false);
+  const { profile, loading: profileLoading, error: profileError } =
+    useAdminProfile(user);
 
   useEffect(() => {
     if (!isFirebaseConfigured) return;
@@ -37,6 +41,8 @@ export default function ComprasPage() {
         auth,
         (currentUser) => {
           setUser(currentUser);
+          setInsumos(null);
+          setPurchases(null);
           if (currentUser) setDataError("");
           setAuthLoading(false);
         },
@@ -54,14 +60,21 @@ export default function ComprasPage() {
   }, []);
 
   useEffect(() => {
-    if (!user || !isFirebaseConfigured) return;
+    if (
+      !user ||
+      !profile ||
+      !canAccessAdminPath("/admin/compras", profile.role) ||
+      !isFirebaseConfigured
+    ) return;
     try {
       const stopInsumos = observarInsumos(
+        profile.storeId,
         setInsumos,
         (error) => setDataError(messageFrom(error)),
+        true,
       );
       const stopPurchases = observarCompras(
-        user.uid,
+        profile.storeId,
         setPurchases,
         (error) => setDataError(messageFrom(error)),
       );
@@ -74,7 +87,7 @@ export default function ComprasPage() {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setDataError(messageFrom(error));
     }
-  }, [user]);
+  }, [user, profile]);
 
   async function login(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -108,14 +121,14 @@ export default function ComprasPage() {
             <div className="eyebrow">Estoque · Compras</div>
             <h1 className="page-title">Entrada de notas fiscais</h1>
             <p className="page-subtitle">
-              Configure o Firebase e o Gemini para iniciar o fluxo de compras.
+              Configure o Firebase e o Grok para iniciar o fluxo de compras.
             </p>
           </div>
         </div>
         <div className="notice">
           Preencha as credenciais Firebase em <code>.env.local</code>. A chave
-          privada do Gemini deve ser configurada somente no servidor como{" "}
-          <code>GEMINI_API_KEY</code>, sem o prefixo NEXT_PUBLIC.
+          chave privada da xAI deve ser configurada somente no servidor como{" "}
+          <code>XAI_API_KEY</code>, sem o prefixo NEXT_PUBLIC.
         </div>
       </AdminShell>
     );
@@ -167,8 +180,28 @@ export default function ComprasPage() {
     );
   }
 
+  if (profileLoading) {
+    return <div className="loading-state">Carregando seu perfil de acesso…</div>;
+  }
+
+  if (!profile) {
+    return (
+      <AdminShell
+        onSignOut={logout}
+        profile={null}
+        userEmail={user.email ?? "Administrador"}
+      >
+        <div className="notice error">{profileError}</div>
+      </AdminShell>
+    );
+  }
+
   return (
-    <AdminShell onSignOut={logout} userEmail={user.email ?? "Administrador"}>
+    <AdminShell
+      onSignOut={logout}
+      profile={profile}
+      userEmail={user.email ?? "Administrador"}
+    >
       <div className="page-heading">
         <div>
           <div className="eyebrow">Estoque · Compras</div>
@@ -185,6 +218,7 @@ export default function ComprasPage() {
         <PurchaseEntry
           insumos={insumos}
           purchases={purchases}
+          storeId={profile.storeId}
           usuarioId={user.uid}
         />
       )}

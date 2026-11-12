@@ -9,16 +9,28 @@ export type UnidadeMedida =
 
 export interface Insumo {
   id: string;
+  storeId: string;
   nome: string;
   categoria: string;
   unidade: UnidadeMedida;
+  quantidadeCompra?: number;
+  precoCompra?: number;
+  fatorCorrecao?: number;
+  custoUnitario?: number;
+  quantidadeEstoque?: number;
+  estoqueMinimo?: number;
+  fichasTecnicasIds?: string[];
+  fornecedor?: string;
+  atualizadoEm: string;
+}
+
+export interface InsumoFinanceiro {
+  id: string;
+  storeId: string;
   quantidadeCompra: number;
   precoCompra: number;
   fatorCorrecao: number;
   custoUnitario: number;
-  quantidadeEstoque?: number;
-  estoqueMinimo?: number;
-  fichasTecnicasIds?: string[];
   fornecedor?: string;
   atualizadoEm: string;
 }
@@ -40,7 +52,8 @@ export type PurchaseListItemStatus =
   | "requested"
   | "pending_approval"
   | "approved"
-  | "rejected";
+  | "rejected"
+  | "purchased";
 
 export interface PurchaseListItem {
   id: string;
@@ -56,10 +69,32 @@ export interface PurchaseListItem {
   criadoPor: string;
   criadoPorEmail: string;
   criadoEm: string;
+  comentarioCompras?: string;
+  valorUnitario?: number | null;
+  valorTotal?: number | null;
+  compradoPor?: string;
+  compradoPorEmail?: string;
+  compradoEm?: string;
   revisadoPor?: string;
   revisadoPorEmail?: string;
   revisadoEm?: string;
   decisao?: string;
+}
+
+export interface VendaSemanalItem {
+  produtoId: string;
+  produtoNome: string;
+  unidadesVendidas: number;
+}
+
+export interface VendasSemanais {
+  id: string;
+  storeId: string;
+  semanaInicio: string;
+  itens: VendaSemanalItem[];
+  importadoPor: string;
+  importadoPorEmail: string;
+  importadoEm: string;
 }
 
 export interface ItemFichaTecnica {
@@ -67,22 +102,23 @@ export interface ItemFichaTecnica {
   insumoNome: string;
   quantidade: number;
   unidade: UnidadeMedida;
-  custoUnitario: number;
-  custoTotal: number;
+  custoUnitario?: number;
+  custoTotal?: number;
 }
 
 export interface FichaTecnica {
   id: string;
+  storeId: string;
   produtoId: string;
   nome: string;
   rendimento: number;
   itens: ItemFichaTecnica[];
-  custoTotal: number;
-  tipoMeta: "cmv" | "margem";
-  percentualMeta: number;
-  precoVenda: number;
-  custoPorPorcao: number;
-  precoSugerido: number;
+  custoTotal?: number;
+  tipoMeta?: "cmv" | "margem";
+  percentualMeta?: number;
+  precoVenda?: number;
+  custoPorPorcao?: number;
+  precoSugerido?: number;
   atualizadoEm: string;
 }
 
@@ -90,6 +126,7 @@ export type TipoMetaPrecificacao = "cmv" | "margem";
 
 export interface Produto {
   id: string;
+  storeId: string;
   nome: string;
   descricao: string;
   categoriaId: string;
@@ -105,6 +142,7 @@ export interface Produto {
 
 export interface CustoProduto {
   id: string;
+  storeId: string;
   produtoId: string;
   custoFicha: number;
   cmvAtual: number;
@@ -117,6 +155,7 @@ export interface CustoProduto {
 
 export interface Categoria {
   id: string;
+  storeId: string;
   nome: string;
   ordem: number;
   ativa: boolean;
@@ -143,6 +182,7 @@ export type StatusCompra =
 
 export interface Compra {
   id: string;
+  storeId: string;
   status: StatusCompra;
   nomeArquivo: string;
   storagePath?: string;
@@ -161,6 +201,7 @@ export interface Compra {
 
 export interface ItemCardapioImportado {
   id: string;
+  storeId: string;
   nomeProduto: string;
   descricao: string;
   quantidade: number | null;
@@ -173,6 +214,7 @@ export interface ItemCardapioImportado {
 
 export interface NotaImportada {
   id: string;
+  storeId: string;
   fornecedor: string;
   numeroNota: string;
   dataEmissao: string;

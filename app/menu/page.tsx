@@ -1,6 +1,6 @@
 "use client";
 
-import { collection, onSnapshot } from "firebase/firestore";
+import { collection, onSnapshot, query, where } from "firebase/firestore";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { CategoryFilter } from "@/components/menu/CategoryFilter";
 import { getFirebaseServices, isFirebaseConfigured } from "@/lib/firebase";
@@ -20,14 +20,20 @@ function getTableNumber() {
   return new URLSearchParams(window.location.search).get("mesa");
 }
 
+function getStoreId() {
+  return new URLSearchParams(window.location.search).get("loja");
+}
+
 export default function MenuPage() {
   const [products, setProducts] = useState<Produto[]>([]);
+  const [loadedStoreId, setLoadedStoreId] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("Todos");
   const tableNumber = useSyncExternalStore(
     subscribeToLocation,
     getTableNumber,
     () => null,
   );
+  const storeId = useSyncExternalStore(subscribeToLocation, getStoreId, () => null);
   const [loading, setLoading] = useState(isFirebaseConfigured);
   const [error, setError] = useState(
     isFirebaseConfigured ? "" : "O cardápio digital ainda não foi conectado ao Firebase.",
@@ -37,11 +43,16 @@ export default function MenuPage() {
     if (!isFirebaseConfigured) {
       return;
     }
+    if (!storeId || !/^[A-Za-z0-9_-]+$/.test(storeId)) return;
 
     try {
       const { db } = getFirebaseServices();
       return onSnapshot(
-        collection(db, "produtos"),
+        query(
+          collection(db, "produtos"),
+          where("storeId", "==", storeId),
+          where("disponivel", "==", true),
+        ),
         (snapshot) => {
           const items = snapshot.docs.map(
             (item) => ({ id: item.id, ...item.data() }) as Produto,
@@ -63,6 +74,7 @@ export default function MenuPage() {
             },
           );
           setProducts(items);
+          setLoadedStoreId(storeId);
           setLoading(false);
         },
         (listenerError) => {
@@ -80,18 +92,23 @@ export default function MenuPage() {
       );
       setLoading(false);
     }
-  }, []);
+  }, [storeId]);
 
   const categories = useMemo(
     () => [...new Set(products.map((product) => product.categoriaNome))].sort(),
     [products],
   );
-  const visibleProducts = products.filter(
+  const visibleProducts = (loadedStoreId === storeId ? products : []).filter(
     (product) =>
       product.disponivel &&
       (selectedCategory === "Todos" ||
         product.categoriaNome === selectedCategory),
   );
+  const menuError =
+    error ||
+    (storeId && /^[A-Za-z0-9_-]+$/.test(storeId)
+      ? ""
+      : "Este cardápio precisa de um identificador de loja válido no link.");
 
   return (
     <main className="customer-menu">
@@ -103,13 +120,13 @@ export default function MenuPage() {
         ) : null}
       </header>
       <div className="customer-content">
-        {error ? <div className="notice">{error}</div> : null}
+        {menuError ? <div className="notice">{menuError}</div> : null}
         <CategoryFilter
           categories={categories}
           onSelect={setSelectedCategory}
           selected={selectedCategory}
         />
-        {loading ? (
+        {loading && !menuError ? (
           <div className="loading-state">Carregando cardápio…</div>
         ) : visibleProducts.length === 0 ? (
           <div className="empty-state">

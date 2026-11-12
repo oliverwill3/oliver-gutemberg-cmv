@@ -6,33 +6,44 @@ import {
   signOut,
   type User,
 } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
 import { useEffect, useMemo, useState } from "react";
 import { AdminShell } from "@/components/admin/AdminShell";
+import {
+  canApprovePurchaseList,
+} from "@/lib/auth/permissions";
+import { loadAdminProfile } from "@/lib/auth/admin-profile";
 import { getFirebaseServices, isFirebaseConfigured } from "@/lib/firebase";
 import {
   adicionarItemListaCompras,
+  atualizarDetalhesCompraLista,
   ensureCurrentPurchaseList,
-  gerarSugestoesEstoqueMinimo,
+  gerarSugestoesReposicao,
+  importarVendasSemanais,
+  marcarItemComoComprado,
   observarItensListaCompras,
+  observarVendasSemanais,
   revisarItemListaCompras,
 } from "@/lib/firestore/purchase-lists";
+import {
+  observarFichasTecnicas,
+  observarProdutos,
+} from "@/lib/firestore/fichas-tecnicas";
 import { observarInsumos } from "@/lib/firestore/insumos";
+import {
+  calcularItensReposicao,
+  parseWeeklySalesCsv,
+} from "@/lib/utils/purchase-planning";
 import type {
+  FichaTecnica,
   Insumo,
+  Produto,
   PurchaseListItem,
   UserProfile,
   UserRole,
   UnidadeMedida,
+  VendasSemanais,
 } from "@/types";
 
-const roles: UserRole[] = [
-  "super_admin",
-  "owner",
-  "manager",
-  "purchasing",
-  "kitchen_bar",
-];
 const roleLabels: Record<UserRole, string> = {
   super_admin: "Administrador global",
   owner: "Proprietário",
@@ -56,25 +67,11 @@ function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Ocorreu um erro inesperado.";
 }
 
-function profileFrom(value: unknown, uid: string): UserProfile | null {
-  if (typeof value !== "object" || value === null) return null;
-  const data = value as Record<string, unknown>;
-  if (
-    typeof data.role !== "string" ||
-    !roles.includes(data.role as UserRole) ||
-    typeof data.storeId !== "string" ||
-    !data.storeId.trim() ||
-    data.storeId.includes("/")
-  ) {
-    return null;
-  }
-  return { uid, role: data.role as UserRole, storeId: data.storeId };
-}
-
 function statusLabel(item: PurchaseListItem) {
   if (item.status === "pending_approval") return "Aguardando aprovação";
   if (item.status === "approved") return "Aprovado para compra";
   if (item.status === "rejected") return "Recusado";
+  if (item.status === "purchased") return "Comprado";
   return item.origem === "automatico" ? "Sugestão de reposição" : "Na lista";
 }
 
@@ -84,6 +81,37 @@ function formatDate(value: string) {
   return Number.isNaN(date.getTime())
     ? "Agora"
     : date.toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
+}
+
+function getLocalDateInputValue(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function getMondayDateInputValue() {
+  const date = new Date();
+  date.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+  return getLocalDateInputValue(date);
+}
+
+function parseOptionalMoney(value: FormDataEntryValue | null) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) return null;
+  const number = Number(text.replace(",", "."));
+  if (!Number.isFinite(number) || number < 0) {
+    throw new Error("Informe valores válidos, iguais ou maiores que zero.");
+  }
+  return number;
+}
+
+function formatCurrency(value: number | null | undefined) {
+  if (typeof value !== "number") return "Não informado";
+  return value.toLocaleString("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+  });
 }
 
 export default function ListaComprasPage() {
@@ -96,6 +124,12 @@ export default function ListaComprasPage() {
   const [authError, setAuthError] = useState("");
   const [items, setItems] = useState<PurchaseListItem[] | null>(null);
   const [insumos, setInsumos] = useState<Insumo[]>([]);
+  const [produtos, setProdutos] = useState<Produto[]>([]);
+  const [fichas, setFichas] = useState<FichaTecnica[]>([]);
+  const [vendasSemanais, setVendasSemanais] = useState<VendasSemanais[]>([]);
+  const [produtosLoaded, setProdutosLoaded] = useState(false);
+  const [fichasLoaded, setFichasLoaded] = useState(false);
+  const [vendasLoaded, setVendasLoaded] = useState(false);
   const [dataError, setDataError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -106,6 +140,8 @@ export default function ListaComprasPage() {
   const [quantity, setQuantity] = useState("");
   const [unit, setUnit] = useState<UnidadeMedida>("unidade");
   const [observation, setObservation] = useState("");
+  const [salesFile, setSalesFile] = useState<File | null>(null);
+  const [salesWeekStart, setSalesWeekStart] = useState(getMondayDateInputValue);
 
   useEffect(() => {
     if (!isFirebaseConfigured) return;
@@ -116,6 +152,13 @@ export default function ListaComprasPage() {
           setUser(currentUser);
           setProfile(null);
           setItems(null);
+          setInsumos([]);
+          setProdutos([]);
+          setFichas([]);
+          setVendasSemanais([]);
+          setProdutosLoaded(false);
+          setFichasLoaded(false);
+          setVendasLoaded(false);
           setProfileError("");
           setDataError("");
           setAuthLoading(false);
@@ -136,22 +179,11 @@ export default function ListaComprasPage() {
   useEffect(() => {
     if (!user) return;
     let active = true;
-    getDoc(doc(getFirebaseServices().db, "userProfiles", user.uid))
-      .then((snapshot) => {
+    loadAdminProfile(getFirebaseServices().db, user.uid)
+      .then(({ profile: loadedProfile, error }) => {
         if (!active) return;
-        if (!snapshot.exists()) {
-          setProfileError(
-            "Seu usuário autenticou, mas ainda não tem perfil operacional. Um administrador precisa cadastrar userProfiles/" +
-              user.uid +
-              " no Firestore.",
-          );
-          return;
-        }
-        const loadedProfile = profileFrom(snapshot.data(), user.uid);
         if (!loadedProfile) {
-          setProfileError(
-            "O perfil precisa conter um role válido e um storeId não vazio.",
-          );
+          setProfileError(error);
           return;
         }
         setProfile(loadedProfile);
@@ -169,6 +201,9 @@ export default function ListaComprasPage() {
     if (!profile || !user) return;
     let stopItems: (() => void) | undefined;
     let stopInsumos: (() => void) | undefined;
+    let stopProdutos: (() => void) | undefined;
+    let stopFichas: (() => void) | undefined;
+    let stopVendas: (() => void) | undefined;
     let active = true;
 
     ensureCurrentPurchaseList(profile.storeId, user.uid)
@@ -180,7 +215,32 @@ export default function ListaComprasPage() {
           (error) => setDataError(getErrorMessage(error)),
         );
         stopInsumos = observarInsumos(
+          profile.storeId,
           setInsumos,
+          (error) => setDataError(getErrorMessage(error)),
+        );
+        stopProdutos = observarProdutos(
+          profile.storeId,
+          (records) => {
+            setProdutos(records);
+            setProdutosLoaded(true);
+          },
+          (error) => setDataError(getErrorMessage(error)),
+        );
+        stopFichas = observarFichasTecnicas(
+          profile.storeId,
+          (records) => {
+            setFichas(records);
+            setFichasLoaded(true);
+          },
+          (error) => setDataError(getErrorMessage(error)),
+        );
+        stopVendas = observarVendasSemanais(
+          profile.storeId,
+          (records) => {
+            setVendasSemanais(records);
+            setVendasLoaded(true);
+          },
           (error) => setDataError(getErrorMessage(error)),
         );
       })
@@ -194,6 +254,9 @@ export default function ListaComprasPage() {
       active = false;
       stopItems?.();
       stopInsumos?.();
+      stopProdutos?.();
+      stopFichas?.();
+      stopVendas?.();
     };
   }, [profile, user]);
 
@@ -201,10 +264,12 @@ export default function ListaComprasPage() {
     () => insumos.find((item) => item.id === selectedInsumoId),
     [insumos, selectedInsumoId],
   );
-  const canApprove =
-    profile?.role === "super_admin" ||
-    profile?.role === "owner" ||
-    profile?.role === "manager";
+  const canApprove = profile ? canApprovePurchaseList(profile.role) : false;
+  const canHandlePurchases =
+    profile !== null &&
+    ["super_admin", "owner", "manager", "purchasing"].includes(profile.role);
+  const canImportSales = canHandlePurchases;
+  const planningReady = produtosLoaded && fichasLoaded && vendasLoaded;
 
   async function handleLogin(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -268,22 +333,103 @@ export default function ListaComprasPage() {
   }
 
   async function handleGenerateSuggestions() {
-    if (!user || !profile || !items) return;
+    if (!user || !profile || !items || !planningReady) return;
     setBusy(true);
     setNotice("");
     setDataError("");
     try {
-      const count = await gerarSugestoesEstoqueMinimo({
+      const suggestions = calcularItensReposicao({
+        insumos,
+        fichas,
+        vendas: vendasSemanais,
+        itensExistentes: items,
+      });
+      const count = await gerarSugestoesReposicao({
         storeId: profile.storeId,
         uid: user.uid,
         email: user.email ?? "",
-        insumos,
-        itensExistentes: items,
+        sugestoes: suggestions,
       });
       setNotice(
         count
-          ? `${count} sugestão(ões) de reposição adicionada(s) à lista.`
-          : "Nenhum insumo está abaixo do estoque mínimo ou já há sugestões abertas.",
+          ? `${count} sugestão(ões) de reposição adicionada(s), usando estoque mínimo e consumo médio das últimas ${vendasSemanais.length} semana(s).`
+          : "Nenhum insumo precisa de reposição ou já existe na lista.",
+      );
+    } catch (error) {
+      setDataError(getErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleImportSales(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!user || !profile || !salesFile || !produtosLoaded) return;
+    setBusy(true);
+    setNotice("");
+    setDataError("");
+    try {
+      const csv = await salesFile.text();
+      const rows = parseWeeklySalesCsv(csv, produtos);
+      await importarVendasSemanais({
+        storeId: profile.storeId,
+        semanaInicio: salesWeekStart,
+        itens: rows,
+        uid: user.uid,
+        email: user.email ?? "",
+      });
+      setNotice(
+        `Relatório da semana iniciada em ${salesWeekStart} importado com ${rows.length} produto(s). Se já havia um relatório para essa semana, ele foi substituído.`,
+      );
+      setSalesFile(null);
+    } catch (error) {
+      setDataError(getErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSavePurchaseDetails(
+    event: React.FormEvent<HTMLFormElement>,
+    item: PurchaseListItem,
+  ) {
+    event.preventDefault();
+    if (!user || !profile) return;
+    const formData = new FormData(event.currentTarget);
+    setBusy(true);
+    setNotice("");
+    setDataError("");
+    try {
+      await atualizarDetalhesCompraLista({
+        storeId: profile.storeId,
+        itemId: item.id,
+        comentarioCompras: String(formData.get("comentarioCompras") ?? ""),
+        valorUnitario: parseOptionalMoney(formData.get("valorUnitario")),
+        valorTotal: parseOptionalMoney(formData.get("valorTotal")),
+        uid: user.uid,
+      });
+      setNotice(`Detalhes de compra de "${item.nome}" atualizados.`);
+    } catch (error) {
+      setDataError(getErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleMarkPurchased(item: PurchaseListItem) {
+    if (!user || !profile) return;
+    setBusy(true);
+    setNotice("");
+    setDataError("");
+    try {
+      await marcarItemComoComprado({
+        storeId: profile.storeId,
+        itemId: item.id,
+        uid: user.uid,
+        email: user.email ?? "",
+      });
+      setNotice(
+        `"${item.nome}" marcado como comprado. O estoque não foi alterado; registre a entrada no recebimento da compra.`,
       );
     } catch (error) {
       setDataError(getErrorMessage(error));
@@ -387,6 +533,7 @@ export default function ListaComprasPage() {
   return (
     <AdminShell
       onSignOut={handleSignOut}
+      profile={profile}
       userEmail={user.email ?? "Usuário"}
     >
       <div className="page-heading">
@@ -413,8 +560,9 @@ export default function ListaComprasPage() {
           {profileError}
           <p>
             Cadastre o documento no Firebase Console em Firestore Database →
-            Dados → coleção <code>userProfiles</code>, usando o UID deste
-            usuário como ID.
+            Dados → coleção <code>userProfiles</code> ou <code>Usuarios</code>,
+            usando o UID deste usuário como ID, com os campos <code>role</code>{" "}
+            e <code>storeId</code>.
           </p>
         </div>
       ) : null}
@@ -423,6 +571,81 @@ export default function ListaComprasPage() {
 
       {profile ? (
         <>
+          {canImportSales ? (
+            <section className="panel purchase-request-panel">
+              <div className="panel-header">
+                <h2 className="panel-title">Importar vendas semanais</h2>
+                <span className="status">
+                  {vendasSemanais.length} semana(s) recente(s)
+                </span>
+              </div>
+              <div className="panel-body">
+                <p className="field-hint">
+                  Envie um CSV com as colunas <code>produto</code> e{" "}
+                  <code>quantidade</code>. Os nomes precisam corresponder aos
+                  produtos do cardápio. A importação da mesma semana substitui o
+                  relatório anterior e alimenta a previsão pelas fichas técnicas.
+                  Produtos sem ficha técnica ou com unidades incompatíveis ficam
+                  fora do cálculo de consumo.
+                </p>
+                {vendasSemanais.length > 0 ? (
+                  <div className="weekly-sales-history">
+                    {vendasSemanais.map((report) => (
+                      <span className="status" key={report.id}>
+                        Semana de {report.semanaInicio} · {report.itens.length}{" "}
+                        produto(s)
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="field-hint">
+                    Sem relatórios ainda; as primeiras sugestões usarão apenas
+                    o estoque mínimo.
+                  </div>
+                )}
+                <form className="form-grid sales-import-form" onSubmit={handleImportSales}>
+                  <div className="field">
+                    <label htmlFor="sales-week-start">
+                      Início da semana (segunda-feira)
+                    </label>
+                    <input
+                      id="sales-week-start"
+                      onChange={(event) => setSalesWeekStart(event.target.value)}
+                      required
+                      type="date"
+                      value={salesWeekStart}
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="sales-report-file">Arquivo CSV</label>
+                    <input
+                      accept=".csv,text/csv"
+                      id="sales-report-file"
+                      key={salesFile?.name ?? "sales-report-empty"}
+                      onChange={(event) =>
+                        setSalesFile(event.target.files?.[0] ?? null)
+                      }
+                      required
+                      type="file"
+                    />
+                    <span className="field-hint">
+                      Exemplo: <code>produto;quantidade</code>
+                    </span>
+                  </div>
+                  <div className="form-actions field full">
+                    <button
+                      className="button button-primary"
+                      disabled={busy || !salesFile || !produtosLoaded}
+                      type="submit"
+                    >
+                      {busy ? "Importando…" : "Importar relatório"}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </section>
+          ) : null}
+
           <section className="panel purchase-request-panel">
             <div className="panel-header">
               <h2 className="panel-title">Adicionar à lista</h2>
@@ -569,19 +792,21 @@ export default function ListaComprasPage() {
               </form>
               <div className="purchase-list-auto">
                 <div>
-                  <strong>Sugestões por estoque mínimo</strong>
+                  <strong>Sugestões de reposição</strong>
                   <p className="field-hint">
-                    Adiciona insumos cadastrados abaixo do mínimo. Não é uma
-                    previsão de vendas nem um pedido de compra.
+                    Quantidade sugerida = estoque mínimo + consumo médio semanal
+                    pelas últimas quatro vendas importadas - estoque atual. Sem
+                    relatório, considera somente o estoque mínimo. Não efetua
+                    compras nem movimenta estoque.
                   </p>
                 </div>
                 <button
                   className="button button-secondary"
-                  disabled={busy || !items}
+                  disabled={busy || !items || !planningReady}
                   onClick={() => void handleGenerateSuggestions()}
                   type="button"
                 >
-                  Gerar sugestões
+                  {planningReady ? "Gerar sugestões" : "Carregando dados…"}
                 </button>
               </div>
             </div>
@@ -599,7 +824,7 @@ export default function ListaComprasPage() {
             ) : items.length === 0 ? (
               <div className="empty-state">
                 A lista está vazia. Adicione uma demanda ou gere sugestões pelo
-                estoque mínimo.
+                estoque mínimo e pelas vendas semanais importadas.
               </div>
             ) : (
               <div className="table-wrap">
@@ -623,6 +848,26 @@ export default function ListaComprasPage() {
                             {item.categoria}
                             {item.observacao ? ` · ${item.observacao}` : ""}
                           </div>
+                          {item.comentarioCompras ? (
+                            <div className="item-subtitle">
+                              Compras: {item.comentarioCompras}
+                            </div>
+                          ) : null}
+                          {item.valorUnitario != null ||
+                          item.valorTotal != null ? (
+                            <div className="item-subtitle">
+                              Unitário: {formatCurrency(item.valorUnitario)} ·
+                              Total: {formatCurrency(item.valorTotal)}
+                            </div>
+                          ) : null}
+                          {item.compradoPorEmail ? (
+                            <div className="item-subtitle">
+                              Marcado como comprado por {item.compradoPorEmail}
+                              {item.compradoEm
+                                ? ` · ${formatDate(item.compradoEm)}`
+                                : ""}
+                            </div>
+                          ) : null}
                           {item.revisadoPorEmail ? (
                             <div className="item-subtitle">
                               Revisado por {item.revisadoPorEmail}
@@ -643,6 +888,60 @@ export default function ListaComprasPage() {
                         <td>{item.criadoPorEmail || item.criadoPor}</td>
                         <td>{formatDate(item.criadoEm)}</td>
                         <td>
+                          {canHandlePurchases ? (
+                            <div className="purchase-row-actions">
+                              <form
+                                className="purchase-details-form"
+                                key={`${item.comentarioCompras ?? ""}:${item.valorUnitario ?? ""}:${item.valorTotal ?? ""}`}
+                                onSubmit={(event) =>
+                                  void handleSavePurchaseDetails(event, item)
+                                }
+                              >
+                                <input
+                                  aria-label={`Comentário de compras para ${item.nome}`}
+                                  defaultValue={item.comentarioCompras ?? ""}
+                                  maxLength={500}
+                                  name="comentarioCompras"
+                                  placeholder="Comentário de compras"
+                                />
+                                <input
+                                  aria-label={`Valor unitário de ${item.nome}`}
+                                  defaultValue={item.valorUnitario ?? ""}
+                                  min="0"
+                                  name="valorUnitario"
+                                  placeholder="Valor unitário"
+                                  step="0.01"
+                                  type="number"
+                                />
+                                <input
+                                  aria-label={`Valor total de ${item.nome}`}
+                                  defaultValue={item.valorTotal ?? ""}
+                                  min="0"
+                                  name="valorTotal"
+                                  placeholder="Valor total"
+                                  step="0.01"
+                                  type="number"
+                                />
+                                <button
+                                  className="icon-button"
+                                  disabled={busy}
+                                  type="submit"
+                                >
+                                  Salvar detalhes
+                                </button>
+                              </form>
+                              {["requested", "approved"].includes(item.status) ? (
+                                <button
+                                  className="icon-button"
+                                  disabled={busy}
+                                  onClick={() => void handleMarkPurchased(item)}
+                                  type="button"
+                                >
+                                  Marcar comprado
+                                </button>
+                              ) : null}
+                            </div>
+                          ) : null}
                           {canApprove && item.status === "pending_approval" ? (
                             <div className="table-actions">
                               <button

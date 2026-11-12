@@ -8,6 +8,11 @@ import {
 } from "firebase/auth";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AdminShell } from "@/components/admin/AdminShell";
+import {
+  canAccessAdminPath,
+  canManageIngredients,
+  canReadFinancialData,
+} from "@/lib/auth/permissions";
 import { getFirebaseServices, isFirebaseConfigured } from "@/lib/firebase";
 import {
   atualizarInsumo,
@@ -16,6 +21,7 @@ import {
   removerInsumo,
 } from "@/lib/firestore/insumos";
 import { calcularCustoUnitarioInsumo } from "@/lib/utils/cmv";
+import { useAdminProfile } from "@/hooks/useAdminProfile";
 import type { Insumo, UnidadeMedida } from "@/types";
 
 type FormValues = {
@@ -65,6 +71,8 @@ export default function InsumosPage() {
   const [search, setSearch] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<FormValues>(emptyForm);
+  const { profile, loading: profileLoading, error: profileError } =
+    useAdminProfile(user);
 
   useEffect(() => {
     if (!isFirebaseConfigured) {
@@ -78,8 +86,8 @@ export default function InsumosPage() {
         (currentUser) => {
           setUser(currentUser);
           setLoading(Boolean(currentUser));
+          setInsumos([]);
           if (currentUser) setError("");
-          if (!currentUser) setInsumos([]);
           setAuthLoading(false);
         },
         (authListenerError) => {
@@ -96,12 +104,18 @@ export default function InsumosPage() {
   }, []);
 
   useEffect(() => {
-    if (!user || !isFirebaseConfigured) {
+    if (
+      !user ||
+      !profile ||
+      !canAccessAdminPath("/admin/insumos", profile.role) ||
+      !isFirebaseConfigured
+    ) {
       return;
     }
 
     try {
       return observarInsumos(
+        profile.storeId,
         (items) => {
           setInsumos(items);
           setLoading(false);
@@ -110,6 +124,7 @@ export default function InsumosPage() {
           setError(getErrorMessage(listenerError));
           setLoading(false);
         },
+        canReadFinancialData(profile.role),
       );
     } catch (listenerError) {
       // Service initialization fails synchronously; report it in the page.
@@ -117,7 +132,7 @@ export default function InsumosPage() {
       setError(getErrorMessage(listenerError));
       setLoading(false);
     }
-  }, [user]);
+  }, [user, profile]);
 
   const filteredInsumos = useMemo(() => {
     const term = search.trim().toLocaleLowerCase("pt-BR");
@@ -178,6 +193,7 @@ export default function InsumosPage() {
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!profile || !canManageIngredients(profile.role)) return;
     setBusy(true);
     setNotice("");
     setError("");
@@ -215,10 +231,10 @@ export default function InsumosPage() {
       }
 
       if (editingId) {
-        await atualizarInsumo(editingId, insumo);
+        await atualizarInsumo(editingId, profile.storeId, insumo);
         setNotice("Insumo atualizado com sucesso.");
       } else {
-        await criarInsumo(insumo);
+        await criarInsumo(profile.storeId, insumo);
         setNotice("Insumo cadastrado com sucesso.");
       }
       resetForm();
@@ -230,11 +246,18 @@ export default function InsumosPage() {
   }
 
   async function handleDelete(item: Insumo) {
+    if (!profile || !canManageIngredients(profile.role)) return;
+    if (item.fichasTecnicasIds?.length) {
+      setError(
+        "Remova este insumo das fichas técnicas vinculadas antes de excluí-lo.",
+      );
+      return;
+    }
     if (!window.confirm(`Excluir o insumo "${item.nome}"?`)) return;
     setError("");
     setNotice("");
     try {
-      await removerInsumo(item.id);
+      await removerInsumo(item.id, profile.storeId);
       if (editingId === item.id) resetForm();
       setNotice("Insumo removido.");
     } catch (deleteError) {
@@ -315,13 +338,36 @@ export default function InsumosPage() {
     );
   }
 
+  if (profileLoading) {
+    return <div className="loading-state">Carregando seu perfil de acesso…</div>;
+  }
+
+  if (!profile) {
+    return (
+      <AdminShell
+        onSignOut={handleSignOut}
+        profile={null}
+        userEmail={user.email ?? "Administrador"}
+      >
+        <div className="notice error">{profileError}</div>
+      </AdminShell>
+    );
+  }
+
   const totalInvestido = insumos.reduce(
-    (total, item) => total + item.precoCompra,
+    (total, item) => total + (item.precoCompra ?? 0),
     0,
   );
 
+  const canEdit = canManageIngredients(profile.role);
+  const canViewCosts = canReadFinancialData(profile.role);
+
   return (
-    <AdminShell onSignOut={handleSignOut} userEmail={user.email ?? "Administrador"}>
+    <AdminShell
+      onSignOut={handleSignOut}
+      profile={profile}
+      userEmail={user.email ?? "Administrador"}
+    >
       <div className="page-heading">
         <div>
           <div className="eyebrow">Fase 1 · Gestão de estoque</div>
@@ -345,17 +391,17 @@ export default function InsumosPage() {
           </div>
           <div className="stat-note">Grupos de insumos ativos</div>
         </section>
-        <section className="panel stat-card">
+        {canViewCosts ? <section className="panel stat-card">
           <div className="stat-label">Valor de compra cadastrado</div>
           <div className="stat-value">{currency.format(totalInvestido)}</div>
           <div className="stat-note">Soma dos preços de compra informados</div>
-        </section>
+        </section> : null}
       </div>
 
       {error ? <div className="notice error">{error}</div> : null}
       {notice ? <div className="notice success">{notice}</div> : null}
 
-      <section className="panel" id="insumo-form">
+      {canEdit ? <section className="panel" id="insumo-form">
         <div className="panel-header">
           <h2 className="panel-title">
             {editingId ? "Editar insumo" : "Cadastrar insumo"}
@@ -496,7 +542,11 @@ export default function InsumosPage() {
             </div>
           </form>
         </div>
-      </section>
+      </section> : (
+        <div className="notice">
+          Perfil de consulta: você pode visualizar os insumos, mas não alterá-los.
+        </div>
+      )}
 
       <section className="panel" style={{ marginTop: 22 }}>
         <div className="panel-header">
@@ -524,12 +574,12 @@ export default function InsumosPage() {
               <thead>
                 <tr>
                   <th>Insumo</th>
-                  <th>Compra</th>
-                  <th>Fator</th>
-                  <th>Custo unitário</th>
+                  {canViewCosts ? <th>Compra</th> : null}
+                  {canViewCosts ? <th>Fator</th> : null}
+                  {canViewCosts ? <th>Custo unitário</th> : null}
                   <th>Estoque</th>
                   <th>Mínimo</th>
-                  <th>Fornecedor</th>
+                  {canViewCosts ? <th>Fornecedor</th> : null}
                   <th>Ações</th>
                 </tr>
               </thead>
@@ -540,14 +590,19 @@ export default function InsumosPage() {
                       <div className="item-title">{item.nome}</div>
                       <div className="item-subtitle">{item.categoria}</div>
                     </td>
-                    <td>
-                      {currency.format(item.precoCompra)} / {item.quantidadeCompra}{" "}
-                      {item.unidade}
-                    </td>
-                    <td>{item.fatorCorrecao.toFixed(2)}</td>
-                    <td>
-                      {currency.format(item.custoUnitario)} / {item.unidade}
-                    </td>
+                    {canViewCosts ? (
+                      <>
+                        <td>
+                          {currency.format(item.precoCompra ?? 0)} /{" "}
+                          {item.quantidadeCompra ?? 0} {item.unidade}
+                        </td>
+                        <td>{(item.fatorCorrecao ?? 1).toFixed(2)}</td>
+                        <td>
+                          {currency.format(item.custoUnitario ?? 0)} /{" "}
+                          {item.unidade}
+                        </td>
+                      </>
+                    ) : null}
                     <td>
                       {(item.quantidadeEstoque ?? 0).toLocaleString("pt-BR")}{" "}
                       {item.unidade}
@@ -558,23 +613,23 @@ export default function InsumosPage() {
                         ? `${item.estoqueMinimo.toLocaleString("pt-BR")} ${item.unidade}`
                         : "—"}
                     </td>
-                    <td>{item.fornecedor || "—"}</td>
+                    {canViewCosts ? <td>{item.fornecedor || "—"}</td> : null}
                     <td>
                       <div className="table-actions">
-                        <button
+                        {canEdit ? <button
                           className="icon-button"
                           onClick={() => startEditing(item)}
                           type="button"
                         >
                           Editar
-                        </button>
-                        <button
+                        </button> : null}
+                        {canEdit ? <button
                           className="icon-button"
                           onClick={() => void handleDelete(item)}
                           type="button"
                         >
                           Excluir
-                        </button>
+                        </button> : null}
                       </div>
                     </td>
                   </tr>

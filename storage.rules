@@ -2,9 +2,33 @@ rules_version = '2';
 
 service firebase.storage {
   match /b/{bucket}/o {
+    function primaryProfilePath() {
+      return /databases/(default)/documents/userProfiles/$(request.auth.uid);
+    }
+
+    function alternateProfilePath() {
+      return /databases/(default)/documents/Usuarios/$(request.auth.uid);
+    }
+
+    function profile() {
+      return firestore.exists(primaryProfilePath())
+        ? firestore.get(primaryProfilePath()).data
+        : firestore.get(alternateProfilePath()).data;
+    }
+
+    function canRecordPurchases() {
+      return request.auth != null
+        && (
+          firestore.exists(primaryProfilePath())
+          || firestore.exists(alternateProfilePath())
+        )
+        && profile().role in ['super_admin', 'owner', 'manager', 'purchasing'];
+    }
+
     match /notas-fiscais/{userId}/{compraId}/{fileName} {
-      allow read: if request.auth != null && request.auth.uid == userId;
-      allow write: if request.auth != null
+      allow read: if canRecordPurchases()
+        && request.auth.uid == userId;
+      allow write: if canRecordPurchases()
         && request.auth.uid == userId
         && request.resource != null
         && request.resource.size <= 10 * 1024 * 1024
