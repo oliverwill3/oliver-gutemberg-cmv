@@ -501,19 +501,33 @@ export async function POST(request: NextRequest) {
       );
     }
     if (!xaiResponse.ok) {
-      const providerError =
-        isRecord(providerResult) && isRecord(providerResult.error)
-          ? providerResult.error
-          : {};
+      const providerBodyRecord = isRecord(providerResult) ? providerResult : {};
+      const providerError = isRecord(providerBodyRecord.error)
+        ? providerBodyRecord.error
+        : {};
+      const providerMessage = [
+        providerError.message,
+        providerError.detail,
+        providerBodyRecord.message,
+        providerBodyRecord.detail,
+        providerBodyRecord.error,
+      ].find(
+        (value): value is string =>
+          typeof value === "string" && value.trim().length > 0,
+      );
+      const providerCode =
+        stringValue(providerError.code) ||
+        stringValue(providerError.type) ||
+        stringValue(providerBodyRecord.code) ||
+        stringValue(providerBodyRecord.type);
       throw new Error(
         JSON.stringify({
           error: {
             status: xaiResponse.status,
-            code: providerError.code,
+            code: providerCode || undefined,
             message:
-              typeof providerError.message === "string"
-                ? providerError.message
-                : `A API xAI rejeitou a solicitação (HTTP ${xaiResponse.status}).`,
+              providerMessage ||
+              `A API xAI rejeitou a solicitação (HTTP ${xaiResponse.status}).`,
           },
         }),
       );

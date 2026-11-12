@@ -37,7 +37,7 @@ export function observarInsumos(
       );
       emit();
     },
-    onError,
+    (error) => onError(new Error(`Leitura de insumos: ${error.message}`)),
   );
   const stopFinance = includeFinancials
     ? onSnapshot(
@@ -52,7 +52,10 @@ export function observarInsumos(
           financeLoaded = true;
           emit();
         },
-        onError,
+        (error) =>
+          onError(
+            new Error(`Leitura de dados financeiros de insumos: ${error.message}`),
+          ),
       )
     : undefined;
   return () => {

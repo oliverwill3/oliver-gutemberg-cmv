@@ -36,6 +36,8 @@ beforeEach(async () => {
     const db = context.firestore();
     const records = [
       ["userProfiles/owner-a", { role: "owner", storeId: "store-a" }],
+      ["userProfiles/manager-a", { role: "manager", storeId: "store-a" }],
+      ["userProfiles/super-admin-a", { role: "super_admin", storeId: "store-b" }],
       ["userProfiles/purchasing-a", { role: "purchasing", storeId: "store-a" }],
       ["userProfiles/kitchen-a", { role: "kitchen_bar", storeId: "store-a" }],
       ["userProfiles/owner-b", { role: "owner", storeId: "store-b" }],
@@ -134,6 +136,21 @@ test("purchasing cannot write operational or financial documents directly", asyn
       nome: "Prato",
     }),
   );
+});
+
+test("owners, managers, and super admins can query financial data by store", async () => {
+  for (const uid of ["owner-a", "manager-a", "super-admin-a"]) {
+    const db = testEnv.authenticatedContext(uid).firestore();
+    const result = await assertSucceeds(
+      getDocs(
+        query(
+          collection(db, "insumoFinancas"),
+          where("storeId", "==", "store-a"),
+        ),
+      ),
+    );
+    assert.equal(result.size, 1, `${uid} should read the store's financial data`);
+  }
 });
 
 test("kitchen can read recipe structure but cannot access costs or write directly", async () => {

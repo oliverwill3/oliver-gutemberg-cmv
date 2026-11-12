@@ -2,15 +2,34 @@ import { doc, getDoc, type Firestore } from "firebase/firestore";
 import { isValidUserProfile } from "@/lib/auth/permissions";
 import type { UserProfile } from "@/types";
 
+function isPermissionDenied(
+  error: unknown,
+): error is { code: "permission-denied" } {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "permission-denied"
+  );
+}
+
 export async function loadAdminProfile(
   db: Firestore,
   uid: string,
 ): Promise<{ profile: UserProfile | null; error: string }> {
-  const [primary, alternate] = await Promise.all([
-    getDoc(doc(db, "userProfiles", uid)),
-    getDoc(doc(db, "Usuarios", uid)),
-  ]);
-  const snapshot = primary.exists() ? primary : alternate;
+  let primary;
+  try {
+    primary = await getDoc(doc(db, "userProfiles", uid));
+  } catch (error) {
+    if (!isPermissionDenied(error)) throw error;
+    console.warn(
+      "Could not read userProfiles profile; trying Usuarios fallback.",
+    );
+  }
+  const snapshot =
+    primary?.exists() === true
+      ? primary
+      : await getDoc(doc(db, "Usuarios", uid));
   if (!snapshot.exists()) {
     return {
       profile: null,
