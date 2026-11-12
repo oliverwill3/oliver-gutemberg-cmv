@@ -1,0 +1,240 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function profilePath() {
+      return /databases/$(database)/documents/userProfiles/$(request.auth.uid);
+    }
+
+    function hasProfile() {
+      return signedIn() && exists(profilePath());
+    }
+
+    function profile() {
+      return get(profilePath()).data;
+    }
+
+    function hasStoreRole(storeId) {
+      return hasProfile()
+        && profile().storeId == storeId
+        && profile().role in [
+          'owner',
+          'manager',
+          'purchasing',
+          'kitchen_bar'
+        ];
+    }
+
+    function isSuperAdmin() {
+      return hasProfile() && profile().role == 'super_admin';
+    }
+
+    function canAccessStore(storeId) {
+      return isSuperAdmin() || hasStoreRole(storeId);
+    }
+
+    function canReviewNewItems(storeId) {
+      return isSuperAdmin()
+        || (
+          hasProfile()
+          && profile().storeId == storeId
+          && profile().role in ['owner', 'manager']
+        );
+    }
+
+    function canUseStorePurchaseList(storeId) {
+      return canAccessStore(storeId)
+        && profile().role in [
+          'super_admin',
+          'owner',
+          'manager',
+          'purchasing',
+          'kitchen_bar'
+        ];
+    }
+
+    match /userProfiles/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    match /stores/{storeId}/purchaseLists/{listId} {
+      allow read: if canUseStorePurchaseList(storeId)
+        && resource.data.storeId == storeId;
+      allow create: if canUseStorePurchaseList(storeId)
+        && request.resource.data.keys().hasOnly([
+          'storeId',
+          'status',
+          'createdBy',
+          'createdAt'
+        ])
+        && request.resource.data.storeId == storeId
+        && request.resource.data.status == 'open'
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if false;
+
+      match /items/{itemId} {
+        function parentListIsOpen() {
+          return get(
+            /databases/$(database)/documents/stores/$(storeId)/purchaseLists/$(listId)
+          ).data.status == 'open';
+        }
+
+        allow read: if canUseStorePurchaseList(storeId)
+          && parentListIsOpen();
+
+        allow create: if canUseStorePurchaseList(storeId)
+          && parentListIsOpen()
+          && request.resource.data.keys().hasAll([
+            'nome',
+            'quantidade',
+            'unidade',
+            'categoria',
+            'insumoId',
+            'novoItem',
+            'origem',
+            'status',
+            'observacao',
+            'criadoPor',
+            'criadoPorEmail',
+            'criadoEm'
+          ])
+          && request.resource.data.keys().hasOnly([
+            'nome',
+            'quantidade',
+            'unidade',
+            'categoria',
+            'insumoId',
+            'novoItem',
+            'origem',
+            'status',
+            'observacao',
+            'criadoPor',
+            'criadoPorEmail',
+            'criadoEm'
+          ])
+          && request.resource.data.nome is string
+          && request.resource.data.nome.size() > 0
+          && request.resource.data.nome.size() <= 150
+          && request.resource.data.quantidade is number
+          && request.resource.data.quantidade > 0
+          && request.resource.data.unidade is string
+          && request.resource.data.unidade.size() > 0
+          && request.resource.data.categoria is string
+          && request.resource.data.observacao is string
+          && request.resource.data.observacao.size() <= 500
+          && request.resource.data.categoria.size() <= 100
+          && request.resource.data.criadoPor == request.auth.uid
+          && request.resource.data.criadoPorEmail == request.auth.token.email
+          && request.resource.data.criadoEm == request.time
+          && request.resource.data.origem in ['manual', 'automatico']
+          && (
+            (
+              request.resource.data.novoItem == true
+              && request.resource.data.status == 'pending_approval'
+              && request.resource.data.insumoId == ''
+            )
+            || (
+              request.resource.data.novoItem == false
+              && request.resource.data.status == 'requested'
+              && request.resource.data.insumoId is string
+              && exists(
+                /databases/$(database)/documents/insumos/$(request.resource.data.insumoId)
+              )
+              && request.resource.data.nome == get(
+                /databases/$(database)/documents/insumos/$(request.resource.data.insumoId)
+              ).data.nome
+              && request.resource.data.categoria == get(
+                /databases/$(database)/documents/insumos/$(request.resource.data.insumoId)
+              ).data.categoria
+              && request.resource.data.unidade == get(
+                /databases/$(database)/documents/insumos/$(request.resource.data.insumoId)
+              ).data.unidade
+            )
+          );
+
+        allow update: if canReviewNewItems(storeId)
+          && parentListIsOpen()
+          && resource.data.novoItem == true
+          && resource.data.status == 'pending_approval'
+          && request.resource.data.status in ['approved', 'rejected']
+          && request.resource.data.revisadoPor == request.auth.uid
+          && request.resource.data.revisadoPorEmail == request.auth.token.email
+          && request.resource.data.revisadoEm == request.time
+          && request.resource.data.decisao is string
+          && request.resource.data.decisao.size() <= 500
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'status',
+            'revisadoPor',
+            'revisadoPorEmail',
+            'revisadoEm',
+            'decisao'
+          ]);
+        allow delete: if false;
+      }
+    }
+
+    match /insumos/{insumoId} {
+      allow read, write: if request.auth != null;
+    }
+
+    match /fichasTecnicas/{fichaId} {
+      allow read, write: if request.auth != null;
+    }
+
+    match /produtoCustos/{produtoId} {
+      allow read, write: if request.auth != null;
+    }
+
+    match /produtos/{produtoId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    match /categorias/{categoriaId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    match /signage/{playlistId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    match /compras/{compraId} {
+      allow create: if request.auth != null
+        && request.resource.data.usuarioId == request.auth.uid;
+      allow read: if request.auth != null
+        && resource.data.usuarioId == request.auth.uid;
+      allow update: if request.auth != null
+        && resource.data.usuarioId == request.auth.uid
+        && request.resource.data.usuarioId == resource.data.usuarioId;
+      allow delete: if false;
+    }
+
+    match /invoices/{invoiceId} {
+      allow create: if request.auth != null
+        && request.resource.data.usuarioId == request.auth.uid;
+      allow read: if request.auth != null
+        && resource.data.usuarioId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /items/{itemId} {
+      allow create: if request.auth != null
+        && request.resource.data.usuarioId == request.auth.uid;
+      allow read: if request.auth != null
+        && resource.data.usuarioId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
